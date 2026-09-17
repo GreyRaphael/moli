@@ -698,7 +698,13 @@ pub struct DocumentLayoutServices {
 
 #[derive(Default)]
 pub struct ResolvedStyleCache {
-    entries: HashMap<usize, crate::ResolvedLayoutStyle>,
+    entries: HashMap<
+        usize,
+        (
+            style::servo_arc::Arc<style::properties::ComputedValues>,
+            crate::ResolvedLayoutStyle,
+        ),
+    >,
 }
 
 impl ResolvedStyleCache {
@@ -707,15 +713,22 @@ impl ResolvedStyleCache {
         computed: &style::servo_arc::Arc<style::properties::ComputedValues>,
     ) -> crate::ResolvedLayoutStyle {
         let key = (&**computed) as *const _ as usize;
-        if let Some(cached) = self.entries.get(&key) {
-            return cached.clone();
+        if let Some((cached_arc, cached_style)) = self.entries.get(&key)
+            && style::servo_arc::Arc::ptr_eq(cached_arc, computed)
+        {
+            return cached_style.clone();
         }
         if self.entries.len() >= 16384 {
             self.entries.clear();
         }
         let resolved = crate::ResolvedLayoutStyle::from_stylo(computed.clone());
-        self.entries.insert(key, resolved.clone());
+        self.entries
+            .insert(key, (computed.clone(), resolved.clone()));
         resolved
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
     }
 }
 
@@ -749,10 +762,7 @@ impl DocumentLayoutServices {
     }
 
     pub fn take_style_cache(&mut self) -> ResolvedStyleCache {
-        self.style_cache
-            .take()
-            .map(|b| *b)
-            .unwrap_or_default()
+        self.style_cache.take().map(|b| *b).unwrap_or_default()
     }
 
     pub fn restore_style_cache(&mut self, cache: ResolvedStyleCache) {

@@ -192,14 +192,8 @@ fn perform_bubbling_scroll_into_view(
         );
         let effective_max_x = f64::from(metrics.maximum_scroll_offset.x).max(desired_x);
         let effective_max_y = f64::from(metrics.maximum_scroll_offset.y).max(desired_y);
-        let target_x = desired_x.clamp(
-            f64::from(metrics.minimum_scroll_offset.x),
-            effective_max_x,
-        );
-        let target_y = desired_y.clamp(
-            f64::from(metrics.minimum_scroll_offset.y),
-            effective_max_y,
-        );
+        let target_x = desired_x.clamp(f64::from(metrics.minimum_scroll_offset.x), effective_max_x);
+        let target_y = desired_y.clamp(f64::from(metrics.minimum_scroll_offset.y), effective_max_y);
         let delta_x = target_x - f64::from(metrics.scroll_offset.x);
         let delta_y = target_y - f64::from(metrics.scroll_offset.y);
         if delta_x == 0.0 && delta_y == 0.0 {
@@ -284,7 +278,6 @@ fn perform_bubbling_scroll_into_view(
     let parent_params = ScrollIntoViewParams {
         horizontal: ScrollIntoViewAlignment::Nearest,
         vertical: ScrollIntoViewAlignment::Nearest,
-        ..params
     };
     changed |= perform_bubbling_scroll_into_view(
         scope,
@@ -419,7 +412,7 @@ mod tests {
     use super::{convert_quads_to_parent_frame, scroll_axis_to_expose};
 
     #[test]
-    fn center_if_needed_returns_the_unclamped_chromium_alignment_position() {
+    fn nearest_mode_returns_minimal_displacement_alignment_position() {
         let viewport = 100.0;
         assert_eq!(scroll_axis_to_expose(20.0, 40.0, 0.0, viewport), 0.0);
         assert_eq!(
@@ -429,8 +422,8 @@ mod tests {
         );
         assert_eq!(scroll_axis_to_expose(-10.0, 20.0, 0.0, viewport), -10.0);
         assert_eq!(scroll_axis_to_expose(90.0, 120.0, 0.0, viewport), 20.0);
-        assert_eq!(scroll_axis_to_expose(200.0, 220.0, 0.0, viewport), 160.0);
-        assert_eq!(scroll_axis_to_expose(0.0, 20.0, 200.0, viewport), -40.0);
+        assert_eq!(scroll_axis_to_expose(200.0, 220.0, 0.0, viewport), 120.0);
+        assert_eq!(scroll_axis_to_expose(0.0, 20.0, 200.0, viewport), 0.0);
     }
 
     #[test]

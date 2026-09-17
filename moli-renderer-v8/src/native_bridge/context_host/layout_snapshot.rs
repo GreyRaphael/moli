@@ -26,7 +26,10 @@ impl LatestLayoutTreeCache {
             .map(|snapshot| snapshot.tree.as_ref())
     }
 
-    pub(super) fn get_mut(&mut self, document: DomHandle) -> Option<&mut FrozenLayoutTree<DomHandle>> {
+    pub(super) fn get_mut(
+        &mut self,
+        document: DomHandle,
+    ) -> Option<&mut FrozenLayoutTree<DomHandle>> {
         self.latest
             .as_mut()
             .filter(|snapshot| snapshot.document == document)

@@ -327,7 +327,9 @@ impl JsContextHost {
     }
 
     pub(crate) fn clear_latest_layout(&self) {
-        self.document_layout_state.borrow_mut().clear_latest_layout();
+        self.document_layout_state
+            .borrow_mut()
+            .clear_latest_layout();
     }
 
     pub(crate) fn update_latest_layout_viewport_scroll(

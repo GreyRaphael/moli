@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use crate::{
     document_runtime::DomHandle,
-    native_bridge::{element::StyleObservation, JsContextHost},
+    native_bridge::{JsContextHost, element::StyleObservation},
     style_engine::{StyleViewport, StyloAnonymousBoxKind},
 };
 
@@ -202,9 +202,8 @@ impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_, '_> {
             );
         }
         let phase_started = self.profile.as_ref().map(|_| Instant::now());
-        let resolved = computed.map(|computed| {
-            ResolvedLayoutPseudoStyle::new(self.cache.get_or_resolve(&computed))
-        });
+        let resolved = computed
+            .map(|computed| ResolvedLayoutPseudoStyle::new(self.cache.get_or_resolve(&computed)));
         if let Some(profile) = self.profile.as_mut() {
             profile.marker_projection_ns = profile.marker_projection_ns.saturating_add(
                 phase_started

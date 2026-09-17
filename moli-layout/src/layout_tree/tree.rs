@@ -269,7 +269,15 @@ where
         }
         let dx = delta_x as f64;
         let dy = delta_y as f64;
-        for layout_box in &mut self.boxes {
+
+        // Viewport-anchored boxes (fixed position and their descendants) remain at fixed viewport
+        // coordinates and do not move when the viewport scroll changes.
+        let mut status = vec![0u8; self.boxes.len()];
+        for i in 0..self.boxes.len() {
+            if self.is_box_viewport_anchored_internal(i, &mut status) {
+                continue;
+            }
+            let layout_box = &mut self.boxes[i];
             layout_box.coordinate_space.local_to_viewport.coefficients[4] -= dx;
             layout_box.coordinate_space.local_to_viewport.coefficients[5] -= dy;
             layout_box
@@ -281,6 +289,40 @@ where
                 .local_to_viewport_ignoring_css_transforms
                 .coefficients[5] -= dy;
         }
+    }
+
+    fn is_box_viewport_anchored_internal(&self, start_idx: usize, status: &mut [u8]) -> bool {
+        if status[start_idx] != 0 {
+            return status[start_idx] == 1;
+        }
+        let mut path = Vec::with_capacity(16);
+        let mut cur = start_idx;
+        while status[cur] == 0 {
+            let geom = &self.boxes[cur].geometry;
+            if geom.position == crate::LayoutPosition::Fixed {
+                status[cur] = 1;
+                break;
+            }
+            path.push(cur);
+            let Some(parent) = geom
+                .layout_parent
+                .or(geom.parent)
+                .or(geom.structural_parent)
+            else {
+                break;
+            };
+            let p_idx = parent.index();
+            if p_idx == cur || p_idx >= self.boxes.len() {
+                break;
+            }
+            cur = p_idx;
+        }
+        let is_anchored = status[cur] == 1;
+        let code = if is_anchored { 1 } else { 2 };
+        for node in path {
+            status[node] = code;
+        }
+        is_anchored
     }
 }
 
@@ -318,37 +360,98 @@ where
         }
     }
 
-    pub fn update_container_scroll(&mut self, container_source: N, new_scroll: LayoutPoint) -> bool {
-        let Some(box_id) = self.source_output(container_source).and_then(|o| o.principal_box) else {
+    pub fn update_container_scroll(
+        &mut self,
+        container_source: N,
+        new_scroll: LayoutPoint,
+    ) -> bool {
+        let Some(box_id) = self
+            .source_output(container_source)
+            .and_then(|o| o.principal_box)
+        else {
             return false;
         };
-        let delta_x = new_scroll.x - self.boxes[box_id.index()].scroll_extent.applied_offset.x;
-        let delta_y = new_scroll.y - self.boxes[box_id.index()].scroll_extent.applied_offset.y;
+        let container_idx = box_id.index();
+        let delta_x = new_scroll.x - self.boxes[container_idx].scroll_extent.applied_offset.x;
+        let delta_y = new_scroll.y - self.boxes[container_idx].scroll_extent.applied_offset.y;
         if delta_x == 0.0 && delta_y == 0.0 {
             return false;
         }
-        self.boxes[box_id.index()].scroll_extent.applied_offset = new_scroll;
+        self.boxes[container_idx].scroll_extent.applied_offset = new_scroll;
         let dx = delta_x as f64;
         let dy = delta_y as f64;
+
+        // Project container-local scroll delta into viewport coordinate space using the container's
+        // 2D affine transform matrix, properly preserving rotation and scaling.
+        let container_space = &self.boxes[container_idx].coordinate_space;
+        let [a, b, c, d, _, _] = container_space.local_to_viewport.coefficients;
+        let shift_x = -(a * dx + c * dy);
+        let shift_y = -(b * dx + d * dy);
+
+        let [ia, ib, ic, id, _, _] = container_space
+            .local_to_viewport_ignoring_css_transforms
+            .coefficients;
+        let shift_ix = -(ia * dx + ic * dy);
+        let shift_iy = -(ib * dx + id * dy);
+
+        // Path-compressed ancestor check to achieve strict O(N) descendant propagation.
+        let mut status = vec![0u8; self.boxes.len()];
+        status[container_idx] = 1;
+
         for i in 0..self.boxes.len() {
-            if i == box_id.index() {
+            if i == container_idx {
                 continue;
             }
-            if self.box_is_layout_descendant_of(super::model::LayoutOutputBoxId::from_index(i), box_id) {
+            if self.is_box_descendant_of_container(i, container_idx, &mut status) {
                 let layout_box = &mut self.boxes[i];
-                layout_box.coordinate_space.local_to_viewport.coefficients[4] -= dx;
-                layout_box.coordinate_space.local_to_viewport.coefficients[5] -= dy;
+                layout_box.coordinate_space.local_to_viewport.coefficients[4] += shift_x;
+                layout_box.coordinate_space.local_to_viewport.coefficients[5] += shift_y;
                 layout_box
                     .coordinate_space
                     .local_to_viewport_ignoring_css_transforms
-                    .coefficients[4] -= dx;
+                    .coefficients[4] += shift_ix;
                 layout_box
                     .coordinate_space
                     .local_to_viewport_ignoring_css_transforms
-                    .coefficients[5] -= dy;
+                    .coefficients[5] += shift_iy;
             }
         }
         true
+    }
+
+    fn is_box_descendant_of_container(
+        &self,
+        start_idx: usize,
+        container_idx: usize,
+        status: &mut [u8],
+    ) -> bool {
+        if status[start_idx] != 0 {
+            return status[start_idx] == 1;
+        }
+        let mut path = Vec::with_capacity(16);
+        let mut cur = start_idx;
+        while status[cur] == 0 {
+            if cur == container_idx {
+                status[cur] = 1;
+                break;
+            }
+            path.push(cur);
+            let geom = &self.boxes[cur].geometry;
+            let Some(parent) = geom.layout_parent.or(geom.parent) else {
+                break;
+            };
+            let p_idx = parent.index();
+            if p_idx == cur || p_idx >= self.boxes.len() {
+                break;
+            }
+            cur = p_idx;
+        }
+        let is_descendant = status[cur] == 1;
+        let code = if is_descendant { 1 } else { 2 };
+        for node in path {
+            status[node] = code;
+        }
+        is_descendant
     }
 }
 
