@@ -21,7 +21,6 @@ pub(super) enum ScrollIntoViewAlignment {
 struct ScrollIntoViewParams {
     horizontal: ScrollIntoViewAlignment,
     vertical: ScrollIntoViewAlignment,
-    center_if_fully_hidden: bool,
 }
 
 fn scroll_axis_to_expose(
@@ -38,16 +37,11 @@ fn scroll_axis_to_expose(
         return current_scroll;
     }
 
-    let partially_visible = target_end > viewport_start && target_start < viewport_end;
-    if partially_visible {
-        return if target_start < viewport_start {
-            target_start
-        } else {
-            target_end - viewport_extent
-        };
+    if target_start < viewport_start {
+        target_start
+    } else {
+        target_end - viewport_extent
     }
-
-    (target_start + target_end - viewport_extent) / 2.0
 }
 
 fn aligned_scroll_position(
@@ -81,7 +75,6 @@ pub(crate) fn scroll_node_into_view_if_needed(
         ScrollIntoViewParams {
             horizontal: ScrollIntoViewAlignment::Nearest,
             vertical: ScrollIntoViewAlignment::Nearest,
-            center_if_fully_hidden: true,
         },
     )
 }
@@ -102,7 +95,6 @@ pub(super) fn scroll_node_into_view(
         ScrollIntoViewParams {
             horizontal,
             vertical,
-            center_if_fully_hidden: false,
         },
     )
 }
@@ -159,7 +151,6 @@ pub(crate) fn scroll_node_into_view_at_start(
         ScrollIntoViewParams {
             horizontal: ScrollIntoViewAlignment::Nearest,
             vertical: ScrollIntoViewAlignment::Start,
-            center_if_fully_hidden: false,
         },
     )
 }
@@ -185,38 +176,20 @@ fn perform_bubbling_scroll_into_view(
         else {
             continue;
         };
-        let desired_x = if params.center_if_fully_hidden {
-            scroll_axis_to_expose(
-                f64::from(target_bounds.x),
-                f64::from(target_bounds.right()),
-                f64::from(metrics.scroll_offset.x),
-                f64::from(metrics.client_size.width),
-            )
-        } else {
-            aligned_scroll_position(
-                f64::from(target_bounds.x),
-                f64::from(target_bounds.right()),
-                f64::from(metrics.scroll_offset.x),
-                f64::from(metrics.client_size.width),
-                params.horizontal,
-            )
-        };
-        let desired_y = if params.center_if_fully_hidden {
-            scroll_axis_to_expose(
-                f64::from(target_bounds.y),
-                f64::from(target_bounds.bottom()),
-                f64::from(metrics.scroll_offset.y),
-                f64::from(metrics.client_size.height),
-            )
-        } else {
-            aligned_scroll_position(
-                f64::from(target_bounds.y),
-                f64::from(target_bounds.bottom()),
-                f64::from(metrics.scroll_offset.y),
-                f64::from(metrics.client_size.height),
-                params.vertical,
-            )
-        };
+        let desired_x = aligned_scroll_position(
+            f64::from(target_bounds.x),
+            f64::from(target_bounds.right()),
+            f64::from(metrics.scroll_offset.x),
+            f64::from(metrics.client_size.width),
+            params.horizontal,
+        );
+        let desired_y = aligned_scroll_position(
+            f64::from(target_bounds.y),
+            f64::from(target_bounds.bottom()),
+            f64::from(metrics.scroll_offset.y),
+            f64::from(metrics.client_size.height),
+            params.vertical,
+        );
         let effective_max_x = f64::from(metrics.maximum_scroll_offset.x).max(desired_x);
         let effective_max_y = f64::from(metrics.maximum_scroll_offset.y).max(desired_y);
         let target_x = desired_x.clamp(
