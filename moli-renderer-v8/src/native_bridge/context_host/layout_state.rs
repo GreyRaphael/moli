@@ -43,6 +43,7 @@ pub(super) struct DocumentLayoutState {
     web_font_resource_generation: Option<StylesheetResourceGeneration>,
     visual_state_generation: u64,
     latest_layout: LatestLayoutTreeCache,
+    layout_dom_version: Option<u64>,
     /// Last used content viewport published by each live iframe owner's
     /// parent layout. Blink keeps the equivalent size on LocalFrameView; it is
     /// separate from the single latest-tree slot because a later fresh layout
@@ -132,13 +133,41 @@ impl DocumentLayoutState {
         &mut self,
         document: DomHandle,
         tree: FrozenLayoutTree<DomHandle>,
+        dom_version: u64,
     ) {
         self.latest_layout.publish(document, tree);
+        self.layout_dom_version = Some(dom_version);
     }
 
     pub(super) fn clear_latest_layout(&mut self) {
         self.latest_layout.clear();
+        self.layout_dom_version = None;
         self.mark_visual_state_dirty();
+    }
+
+    pub(super) fn update_latest_layout_viewport_scroll(
+        &mut self,
+        document: DomHandle,
+        new_scroll: moli_layout::LayoutPoint,
+    ) {
+        if let Some(tree) = self.latest_layout.get_mut(document) {
+            tree.update_viewport_scroll(new_scroll);
+        }
+    }
+
+    pub(super) fn update_latest_layout_container_scroll(
+        &mut self,
+        document: DomHandle,
+        container: DomHandle,
+        new_scroll: moli_layout::LayoutPoint,
+    ) {
+        if let Some(tree) = self.latest_layout.get_mut(document) {
+            tree.update_container_scroll(container, new_scroll);
+        }
+    }
+
+    pub(super) fn is_latest_layout_fresh(&self, current_dom_version: u64) -> bool {
+        self.layout_dom_version == Some(current_dom_version)
     }
 
     pub(super) fn frame_viewport(&self, frame: DomHandle) -> Option<LayoutViewport> {

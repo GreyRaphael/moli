@@ -55,8 +55,14 @@ fn build_native_layout_pass_recursive(
         root,
         request.requests_paint(),
     );
-    let mut styles =
-        style_resolver::NativeLayoutStyleResolver::new(runtime, root, document, request.viewport);
+    let mut style_cache = services.take_style_cache();
+    let mut styles = style_resolver::NativeLayoutStyleResolver::new(
+        runtime,
+        root,
+        document,
+        request.viewport,
+        &mut style_cache,
+    );
     let result = {
         let mut frames = NativeEmbeddedFrameRenderer {
             runtime,
@@ -69,6 +75,8 @@ fn build_native_layout_pass_recursive(
         build_layout_pass_with_embedded_frames(&source, &mut styles, services, request, &mut frames)
     };
     styles.trace_profile(document);
+    drop(styles);
+    services.restore_style_cache(style_cache);
     document_stack.pop();
     result
 }
@@ -149,7 +157,13 @@ pub(crate) fn build_normalized_native_box_tree_for_test(
         .unwrap_or_else(|| runtime.document_handle());
     let viewport = runtime.layout_viewport_for_document(document);
     let source = source_view::NativeLayoutSourceView::new(runtime, root);
-    let mut styles =
-        style_resolver::NativeLayoutStyleResolver::new(runtime, root, document, viewport);
+    let mut style_cache = moli_layout::ResolvedStyleCache::default();
+    let mut styles = style_resolver::NativeLayoutStyleResolver::new(
+        runtime,
+        root,
+        document,
+        viewport,
+        &mut style_cache,
+    );
     moli_layout::build_layout_world(&source, &mut styles).map(|world| world.normalized_tree())
 }

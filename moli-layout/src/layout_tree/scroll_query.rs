@@ -211,7 +211,7 @@ where
         })
     }
 
-    fn box_is_layout_descendant_of(
+    pub(crate) fn box_is_layout_descendant_of(
         &self,
         mut candidate: LayoutOutputBoxId,
         ancestor: LayoutOutputBoxId,

@@ -320,8 +320,8 @@ pub(crate) struct ViewportScrollPolicy {
     scrollbar_gutter: LayoutScrollbarGutter,
     scrollbar_colors: Option<LayoutScrollbarColors>,
     horizontal_writing_mode: bool,
-    revealed_scrollbar_x: bool,
-    revealed_scrollbar_y: bool,
+    pub(crate) revealed_scrollbar_x: bool,
+    pub(crate) revealed_scrollbar_y: bool,
 }
 
 impl Default for ViewportScrollPolicy {

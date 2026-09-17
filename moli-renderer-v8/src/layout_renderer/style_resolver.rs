@@ -1,18 +1,19 @@
 use moli_layout::{
     LayoutDisplay, LayoutError, LayoutStyleResolver, LayoutViewport, ResolvedLayoutElementStyles,
-    ResolvedLayoutPseudoStyle, ResolvedLayoutStyle,
+    ResolvedLayoutPseudoStyle, ResolvedLayoutStyle, ResolvedStyleCache,
 };
 use std::time::Instant;
 
 use crate::{
     document_runtime::DomHandle,
-    native_bridge::{JsContextHost, element::StyleObservation},
+    native_bridge::{element::StyleObservation, JsContextHost},
     style_engine::{StyleViewport, StyloAnonymousBoxKind},
 };
 
-pub(super) struct NativeLayoutStyleResolver<'a> {
+pub(super) struct NativeLayoutStyleResolver<'a, 's> {
     runtime: &'a JsContextHost,
     reads: StyleObservation<'a>,
+    cache: &'s mut ResolvedStyleCache,
     scripting_enabled: bool,
     profile: Option<NativeLayoutStyleResolverProfile>,
 }
@@ -33,18 +34,20 @@ struct NativeLayoutStyleResolverProfile {
     anonymous_projection_ns: u128,
 }
 
-impl<'a> NativeLayoutStyleResolver<'a> {
+impl<'a, 's> NativeLayoutStyleResolver<'a, 's> {
     pub(super) fn new(
         runtime: &'a JsContextHost,
         root: DomHandle,
         document: DomHandle,
         viewport: LayoutViewport,
+        cache: &'s mut ResolvedStyleCache,
     ) -> Self {
         let mut reads = layout_style_read_scope(runtime, document, viewport);
         let _ = reads.read(root).computed_values();
         Self {
             runtime,
             reads,
+            cache,
             scripting_enabled: runtime.document_scripting_enabled(document),
             profile: moli_trace::cpu_profile_enabled()
                 .then(NativeLayoutStyleResolverProfile::default),
@@ -101,7 +104,7 @@ fn layout_style_viewport(runtime: &JsContextHost, viewport: LayoutViewport) -> S
     .with_device_pixel_ratio(screen.device_pixel_ratio)
 }
 
-impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_> {
+impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_, '_> {
     fn element_styles(
         &mut self,
         node: DomHandle,
@@ -129,7 +132,7 @@ impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_> {
             );
         }
         let phase_started = self.profile.as_ref().map(|_| Instant::now());
-        let mut resolved = ResolvedLayoutStyle::from_stylo(computed);
+        let mut resolved = self.cache.get_or_resolve(&computed);
         if let Some(profile) = self.profile.as_mut() {
             profile.primary_projection_ns = profile.primary_projection_ns.saturating_add(
                 phase_started
@@ -138,8 +141,8 @@ impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_> {
             );
         }
         let phase_started = self.profile.as_ref().map(|_| Instant::now());
-        let before = before.map(ResolvedLayoutStyle::from_stylo);
-        let after = after.map(ResolvedLayoutStyle::from_stylo);
+        let before = before.map(|computed| self.cache.get_or_resolve(&computed));
+        let after = after.map(|computed| self.cache.get_or_resolve(&computed));
         if let Some(profile) = self.profile.as_mut() {
             profile.eager_pseudo_count = profile
                 .eager_pseudo_count
@@ -200,7 +203,7 @@ impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_> {
         }
         let phase_started = self.profile.as_ref().map(|_| Instant::now());
         let resolved = computed.map(|computed| {
-            ResolvedLayoutPseudoStyle::new(ResolvedLayoutStyle::from_stylo(computed))
+            ResolvedLayoutPseudoStyle::new(self.cache.get_or_resolve(&computed))
         });
         if let Some(profile) = self.profile.as_mut() {
             profile.marker_projection_ns = profile.marker_projection_ns.saturating_add(
@@ -244,7 +247,7 @@ impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_> {
             );
         }
         let phase_started = self.profile.as_ref().map(|_| Instant::now());
-        let mut resolved = ResolvedLayoutStyle::from_stylo(computed);
+        let mut resolved = self.cache.get_or_resolve(&computed);
         resolved.force_layout_display(display);
         if let Some(profile) = self.profile.as_mut() {
             profile.anonymous_projection_ns = profile.anonymous_projection_ns.saturating_add(

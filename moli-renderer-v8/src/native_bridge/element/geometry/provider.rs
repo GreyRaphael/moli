@@ -268,6 +268,9 @@ pub(crate) fn observable_scroll_into_view_geometry(
     let Some(document) = runtime.layout_document_for_source(source) else {
         return Ok(None);
     };
+    if runtime.layout_policy().uses_real_layout() && !runtime.is_latest_layout_dom_fresh() {
+        runtime.clear_latest_layout();
+    }
     let answers = observable_geometry_batch(
         runtime,
         document,
@@ -275,7 +278,23 @@ pub(crate) fn observable_scroll_into_view_geometry(
         &LayoutQueryBatch::new(vec![LayoutQuery::ScrollIntoViewGeometry { source }]),
     )?;
     match answers.answers.into_iter().next() {
-        Some(LayoutQueryAnswer::ScrollIntoViewGeometry(geometry)) => Ok(geometry),
+        Some(LayoutQueryAnswer::ScrollIntoViewGeometry(Some(geometry))) => Ok(Some(geometry)),
+        Some(LayoutQueryAnswer::ScrollIntoViewGeometry(None)) => {
+            if runtime.layout_policy().uses_real_layout() {
+                runtime.clear_latest_layout();
+                let fresh_answers = runtime.answer_layout_for_document(
+                    document,
+                    reason,
+                    &LayoutQueryBatch::new(vec![LayoutQuery::ScrollIntoViewGeometry { source }]),
+                )?;
+                match fresh_answers.answers.into_iter().next() {
+                    Some(LayoutQueryAnswer::ScrollIntoViewGeometry(geom)) => Ok(geom),
+                    _ => Err(provider_contract_error("scroll-into-view geometry")),
+                }
+            } else {
+                Ok(None)
+            }
+        }
         _ => Err(provider_contract_error("scroll-into-view geometry")),
     }
 }

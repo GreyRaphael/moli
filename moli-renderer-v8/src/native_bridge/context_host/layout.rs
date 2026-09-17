@@ -307,7 +307,7 @@ impl JsContextHost {
         let tree = pass.into_tree();
         let frame_viewports_changed = {
             let mut state = self.document_layout_state.borrow_mut();
-            state.publish_latest_layout(document, tree);
+            state.publish_latest_layout(document, tree, self.dom_host().dom_version());
             state.update_frame_viewports(frame_viewports)
         };
         if frame_viewports_changed {
@@ -318,6 +318,37 @@ impl JsContextHost {
         self.layout_snapshot_cache_publishes
             .set(self.layout_snapshot_cache_publishes.get().saturating_add(1));
         Ok(Some(consumed))
+    }
+
+    pub(crate) fn is_latest_layout_dom_fresh(&self) -> bool {
+        self.document_layout_state
+            .borrow()
+            .is_latest_layout_fresh(self.dom_host().dom_version())
+    }
+
+    pub(crate) fn clear_latest_layout(&self) {
+        self.document_layout_state.borrow_mut().clear_latest_layout();
+    }
+
+    pub(crate) fn update_latest_layout_viewport_scroll(
+        &self,
+        document: DomHandle,
+        new_scroll: moli_layout::LayoutPoint,
+    ) {
+        self.document_layout_state
+            .borrow_mut()
+            .update_latest_layout_viewport_scroll(document, new_scroll);
+    }
+
+    pub(crate) fn update_latest_layout_container_scroll(
+        &self,
+        document: DomHandle,
+        container: DomHandle,
+        new_scroll: moli_layout::LayoutPoint,
+    ) {
+        self.document_layout_state
+            .borrow_mut()
+            .update_latest_layout_container_scroll(document, container, new_scroll);
     }
 
     pub(crate) fn answer_layout_for_document(

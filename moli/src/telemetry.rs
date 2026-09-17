@@ -7,7 +7,9 @@ fn first_party_filter(log_level: &str) -> EnvFilter {
     let level = log_level
         .parse::<LevelFilter>()
         .unwrap_or(DEFAULT_LOG_LEVEL);
-    EnvFilter::new(format!("off,{FIRST_PARTY_TARGET_PREFIX}={level}"))
+    EnvFilter::new(format!(
+        "off,{FIRST_PARTY_TARGET_PREFIX}={level},moli_={level},moli_cpu_profile={level}"
+    ))
 }
 
 pub fn init(log_filter: &str) {

@@ -46,8 +46,17 @@ pub(super) fn set_node_scroll_position(
             document,
         )
     };
-    if changed && queue_observable_effects {
-        queue_scroll_observable_effects(scope, runtime_ptr, document, false);
+    if changed {
+        let runtime = unsafe { &*runtime_ptr };
+        let doc = document.unwrap_or_else(|| runtime.document_handle());
+        runtime.update_latest_layout_container_scroll(
+            doc,
+            handle,
+            moli_layout::LayoutPoint::new(left as f32, top as f32),
+        );
+        if queue_observable_effects {
+            queue_scroll_observable_effects(scope, runtime_ptr, document, false);
+        }
     }
     changed
 }
@@ -159,7 +168,38 @@ pub(crate) fn apply_scroll_observable_effects(
         }
     }
     queue_revealed_lazy_media_loads(scope, runtime_ptr);
-    unsafe { &*runtime_ptr }.invalidate_layout_after_interaction_state_change();
+    let runtime = unsafe { &*runtime_ptr };
+    runtime.clear_layout_rect_cache();
+    let (window_scroll_x, window_scroll_y) = crate::window_host::current_window_scroll_position(scope);
+    for effect in &effects {
+        let document = effect.document().unwrap_or_else(|| runtime.document_handle());
+        let (elem_scroll_x, elem_scroll_y) = runtime
+            .dom_host()
+            .dom()
+            .document_element_handle_for_document(document)
+            .and_then(|handle| runtime.dom_host().node(handle))
+            .and_then(|node| node.as_element())
+            .map_or((0.0, 0.0), |element| (element.scroll_left(), element.scroll_top()));
+        let body_scroll_y = runtime
+            .dom_host()
+            .dom()
+            .document_element_handle_for_document(document)
+            .and_then(|doc_elem| runtime.dom_host().child_nodes(doc_elem))
+            .and_then(|children| {
+                children.into_iter().find(|child| {
+                    runtime.dom_host().is_html_element_named(*child, "body")
+                })
+            })
+            .and_then(|body| runtime.dom_host().node(body))
+            .and_then(|node| node.as_element())
+            .map_or(0.0, |element| element.scroll_top());
+        let final_scroll_x = window_scroll_x.max(elem_scroll_x);
+        let final_scroll_y = window_scroll_y.max(elem_scroll_y).max(body_scroll_y);
+        runtime.update_latest_layout_viewport_scroll(
+            document,
+            moli_layout::LayoutPoint::new(final_scroll_x as f32, final_scroll_y as f32),
+        );
+    }
     crate::observer_runtime::queue_intersection_checks(scope, runtime_ptr);
     if effects
         .iter()

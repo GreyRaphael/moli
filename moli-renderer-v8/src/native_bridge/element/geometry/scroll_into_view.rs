@@ -217,13 +217,15 @@ fn perform_bubbling_scroll_into_view(
                 params.vertical,
             )
         };
+        let effective_max_x = f64::from(metrics.maximum_scroll_offset.x).max(desired_x);
+        let effective_max_y = f64::from(metrics.maximum_scroll_offset.y).max(desired_y);
         let target_x = desired_x.clamp(
             f64::from(metrics.minimum_scroll_offset.x),
-            f64::from(metrics.maximum_scroll_offset.x),
+            effective_max_x,
         );
         let target_y = desired_y.clamp(
             f64::from(metrics.minimum_scroll_offset.y),
-            f64::from(metrics.maximum_scroll_offset.y),
+            effective_max_y,
         );
         let delta_x = target_x - f64::from(metrics.scroll_offset.x);
         let delta_y = target_y - f64::from(metrics.scroll_offset.y);

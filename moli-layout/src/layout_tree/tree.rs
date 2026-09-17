@@ -256,6 +256,32 @@ where
     pub fn embedded_frames(&self) -> impl ExactSizeIterator<Item = &FrozenEmbeddedFrame<N>> {
         self.embedded_frames.iter()
     }
+
+    pub fn update_viewport_scroll(&mut self, new_scroll: LayoutPoint) {
+        let delta_x = new_scroll.x - self.viewport_scroll.x;
+        let delta_y = new_scroll.y - self.viewport_scroll.y;
+        if delta_x == 0.0 && delta_y == 0.0 {
+            return;
+        }
+        self.viewport_scroll = new_scroll;
+        if let Some(root_box) = self.boxes.get_mut(self.root_box.index()) {
+            root_box.scroll_extent.applied_offset = new_scroll;
+        }
+        let dx = delta_x as f64;
+        let dy = delta_y as f64;
+        for layout_box in &mut self.boxes {
+            layout_box.coordinate_space.local_to_viewport.coefficients[4] -= dx;
+            layout_box.coordinate_space.local_to_viewport.coefficients[5] -= dy;
+            layout_box
+                .coordinate_space
+                .local_to_viewport_ignoring_css_transforms
+                .coefficients[4] -= dx;
+            layout_box
+                .coordinate_space
+                .local_to_viewport_ignoring_css_transforms
+                .coefficients[5] -= dy;
+        }
+    }
 }
 
 impl<N> FrozenLayoutTree<N>
@@ -290,6 +316,39 @@ where
             embedded_frames,
             embedded_frames_complete,
         }
+    }
+
+    pub fn update_container_scroll(&mut self, container_source: N, new_scroll: LayoutPoint) -> bool {
+        let Some(box_id) = self.source_output(container_source).and_then(|o| o.principal_box) else {
+            return false;
+        };
+        let delta_x = new_scroll.x - self.boxes[box_id.index()].scroll_extent.applied_offset.x;
+        let delta_y = new_scroll.y - self.boxes[box_id.index()].scroll_extent.applied_offset.y;
+        if delta_x == 0.0 && delta_y == 0.0 {
+            return false;
+        }
+        self.boxes[box_id.index()].scroll_extent.applied_offset = new_scroll;
+        let dx = delta_x as f64;
+        let dy = delta_y as f64;
+        for i in 0..self.boxes.len() {
+            if i == box_id.index() {
+                continue;
+            }
+            if self.box_is_layout_descendant_of(super::model::LayoutOutputBoxId::from_index(i), box_id) {
+                let layout_box = &mut self.boxes[i];
+                layout_box.coordinate_space.local_to_viewport.coefficients[4] -= dx;
+                layout_box.coordinate_space.local_to_viewport.coefficients[5] -= dy;
+                layout_box
+                    .coordinate_space
+                    .local_to_viewport_ignoring_css_transforms
+                    .coefficients[4] -= dx;
+                layout_box
+                    .coordinate_space
+                    .local_to_viewport_ignoring_css_transforms
+                    .coefficients[5] -= dy;
+            }
+        }
+        true
     }
 }
 

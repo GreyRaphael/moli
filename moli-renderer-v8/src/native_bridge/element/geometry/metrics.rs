@@ -606,10 +606,11 @@ pub(in crate::native_bridge) fn node_scroll_into_view_if_needed_callback(
     args: v8::FunctionCallbackArguments<'_>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if let Ok((runtime_ptr, handle)) = node_runtime_and_handle_from_object(scope, args.this())
-        && let Err(error) = scroll_node_into_view_if_needed(scope, runtime_ptr, handle, None)
-    {
-        throw_scroll_layout_error(scope, "scrollIntoViewIfNeeded", error);
+    if let Ok((runtime_ptr, handle)) = node_runtime_and_handle_from_object(scope, args.this()) {
+        if let Err(error) = scroll_node_into_view_if_needed(scope, runtime_ptr, handle, None) {
+            throw_scroll_layout_error(scope, "scrollIntoViewIfNeeded", error);
+        }
+        crate::observer_runtime::queue_intersection_checks(scope, runtime_ptr);
     }
     reveal_lazy_images_for_scroll(scope, args.this());
     rv.set_undefined();
@@ -627,6 +628,7 @@ pub(in crate::native_bridge) fn node_scroll_into_view_callback(
         {
             throw_scroll_layout_error(scope, "scrollIntoView", error);
         }
+        crate::observer_runtime::queue_intersection_checks(scope, runtime_ptr);
     }
     reveal_lazy_images_for_scroll(scope, args.this());
     rv.set_undefined();

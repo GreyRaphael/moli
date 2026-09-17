@@ -693,6 +693,30 @@ pub struct DocumentLayoutServices {
     system_font_policy: SystemFontPolicy,
     web_fonts: BTreeMap<String, RegisteredWebFont>,
     pub(crate) text_layout_passes: u64,
+    pub(crate) style_cache: Option<Box<ResolvedStyleCache>>,
+}
+
+#[derive(Default)]
+pub struct ResolvedStyleCache {
+    entries: HashMap<usize, crate::ResolvedLayoutStyle>,
+}
+
+impl ResolvedStyleCache {
+    pub fn get_or_resolve(
+        &mut self,
+        computed: &style::servo_arc::Arc<style::properties::ComputedValues>,
+    ) -> crate::ResolvedLayoutStyle {
+        let key = (&**computed) as *const _ as usize;
+        if let Some(cached) = self.entries.get(&key) {
+            return cached.clone();
+        }
+        if self.entries.len() >= 16384 {
+            self.entries.clear();
+        }
+        let resolved = crate::ResolvedLayoutStyle::from_stylo(computed.clone());
+        self.entries.insert(key, resolved.clone());
+        resolved
+    }
 }
 
 impl Default for DocumentLayoutServices {
@@ -709,6 +733,7 @@ impl DocumentLayoutServices {
             system_font_policy: SystemFontPolicy::Enabled,
             web_fonts: BTreeMap::new(),
             text_layout_passes: 0,
+            style_cache: None,
         }
     }
 
@@ -719,7 +744,28 @@ impl DocumentLayoutServices {
             system_font_policy,
             web_fonts: BTreeMap::new(),
             text_layout_passes: 0,
+            style_cache: None,
         }
+    }
+
+    pub fn take_style_cache(&mut self) -> ResolvedStyleCache {
+        self.style_cache
+            .take()
+            .map(|b| *b)
+            .unwrap_or_default()
+    }
+
+    pub fn restore_style_cache(&mut self, cache: ResolvedStyleCache) {
+        self.style_cache = Some(Box::new(cache));
+    }
+
+    pub fn get_or_resolve_style(
+        &mut self,
+        computed: &style::servo_arc::Arc<style::properties::ComputedValues>,
+    ) -> crate::ResolvedLayoutStyle {
+        self.style_cache
+            .get_or_insert_with(Default::default)
+            .get_or_resolve(computed)
     }
 
     pub const fn system_font_policy(&self) -> SystemFontPolicy {
