@@ -418,10 +418,11 @@ impl JsContextHost {
         let reuse_latest = !self.force_fresh_layout_reads_for_test;
         #[cfg(not(test))]
         let reuse_latest = true;
+        let dom_fresh = self.is_latest_layout_dom_fresh();
         let cached = reuse_latest
             && self
                 .with_latest_layout_tree_for_document(document, |tree| {
-                    layout_tree_satisfies_request(tree, reason, viewport, true)
+                    layout_tree_satisfies_request(tree, reason, viewport, true, dom_fresh)
                 })
                 .unwrap_or(false);
         if cached {
@@ -452,9 +453,11 @@ impl JsContextHost {
         let reuse_latest = !self.force_fresh_layout_reads_for_test;
         #[cfg(not(test))]
         let reuse_latest = true;
+        let dom_fresh = self.is_latest_layout_dom_fresh();
         let cached = if reuse_latest {
             self.with_latest_layout_tree_for_document(document, |tree| {
-                if !layout_tree_satisfies_request(tree, reason, viewport, exact_viewport) {
+                if !layout_tree_satisfies_request(tree, reason, viewport, exact_viewport, dom_fresh)
+                {
                     return None;
                 }
                 self.last_layout_pass_metrics
@@ -650,7 +653,16 @@ fn layout_tree_satisfies_request(
     reason: LayoutFlushReason,
     viewport: LayoutViewport,
     exact_viewport: bool,
+    dom_fresh: bool,
 ) -> bool {
+    if !dom_fresh
+        && matches!(
+            reason,
+            LayoutFlushReason::SynchronousGeometry | LayoutFlushReason::CdpGeometry
+        )
+    {
+        return false;
+    }
     (!exact_viewport || tree.viewport == viewport)
         && (!matches!(reason, LayoutFlushReason::HitTest) || tree.embedded_frames_complete())
 }
