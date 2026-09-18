@@ -130,6 +130,7 @@ fn parses_explicit_fetch_command_with_compatibility_flags() {
                 http_timeout: Some(5000),
                 http_max_response_size: Some(4096),
                 http_cache_dir: None,
+                no_http_cache: false,
                 profile_dir: None,
                 image: false,
                 font: false,
@@ -1853,4 +1854,25 @@ fn app_config_from_cli_loads_document_start_scripts() {
     );
 
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn app_config_serve_enables_default_http_cache_when_unspecified() {
+    let cli = Cli::try_parse_from(normalize_args_for_compat(["moli", "serve"])).unwrap();
+    let config = AppConfig::from_cli(&cli).unwrap();
+    let cache_dir = config.browser.fetch().http_cache_dir();
+    assert!(cache_dir.is_some());
+    assert!(cache_dir.unwrap().contains("http-cache"));
+}
+
+#[test]
+fn app_config_serve_respects_no_http_cache_flag() {
+    let cli = Cli::try_parse_from(normalize_args_for_compat([
+        "moli",
+        "serve",
+        "--no-http-cache",
+    ]))
+    .unwrap();
+    let config = AppConfig::from_cli(&cli).unwrap();
+    assert_eq!(config.browser.fetch().http_cache_dir(), None);
 }

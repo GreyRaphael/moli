@@ -539,6 +539,10 @@ pub struct CommonArgs {
     #[arg(long)]
     pub http_cache_dir: Option<String>,
 
+    /// Disable default HTTP disk cache for `moli serve`.
+    #[arg(long)]
+    pub no_http_cache: bool,
+
     #[arg(short = 'P', long)]
     pub profile_dir: Option<String>,
 

@@ -160,6 +160,9 @@ pub async fn run_cli_with_config<W: Write>(
                      protocol-server navigations are not checked against robots.txt"
                 );
             }
+            if let Some(cache_dir) = config.browser.fetch().http_cache_dir() {
+                tracing::info!(cache_dir = %cache_dir, "http disk cache enabled");
+            }
             let storage_partition =
                 Arc::new(StoragePartitionState::open(config.browser.profile_dir())?);
             storage_partition.import_cookies(load_cookie_state_cookies(&config)?)?;

@@ -66,6 +66,15 @@ impl AppConfig {
                 if let Some(interval_ms) = args.screencast_interval {
                     config.server.screencast_interval_ms = interval_ms;
                 }
+                if config.browser.fetch().http_cache_dir().is_none()
+                    && !args.common.no_http_cache
+                    && args.common.http_cache_dir.as_deref() != Some("")
+                {
+                    config
+                        .browser
+                        .fetch_mut()
+                        .set_http_cache_dir(Some(default_http_cache_dir().display().to_string()));
+                }
             }
             Commands::Import(_) => {}
         }
@@ -142,20 +151,29 @@ fn apply_common_args(config: &mut AppConfig, common: &CommonArgs) -> Result<()> 
         common.http_max_total_connections,
         common.http2_max_concurrent_streams,
     );
-    config
-        .browser
-        .fetch_mut()
-        .set_http_cache_dir(common.http_cache_dir.clone());
-    if let Some(profile_dir) = &common.profile_dir {
+    if common.no_http_cache {
+        config.browser.fetch_mut().set_http_cache_dir(None);
+    } else {
+        let http_cache_dir = common
+            .http_cache_dir
+            .as_ref()
+            .filter(|dir| !dir.trim().is_empty())
+            .cloned();
         config
             .browser
-            .set_profile_dir(Some(PathBuf::from(profile_dir)));
-        if common.http_cache_dir.is_none() {
-            let profile = BrowserProfilePaths::new(profile_dir);
+            .fetch_mut()
+            .set_http_cache_dir(http_cache_dir);
+        if let Some(profile_dir) = &common.profile_dir {
             config
                 .browser
-                .fetch_mut()
-                .set_http_cache_dir(Some(profile.http_cache_root.display().to_string()));
+                .set_profile_dir(Some(PathBuf::from(profile_dir)));
+            if common.http_cache_dir.is_none() {
+                let profile = BrowserProfilePaths::new(profile_dir);
+                config
+                    .browser
+                    .fetch_mut()
+                    .set_http_cache_dir(Some(profile.http_cache_root.display().to_string()));
+            }
         }
     }
     let mut optional_resource_fetch_mask = if common.resource {
@@ -342,6 +360,48 @@ pub fn response_wait_criteria_from_args(
             }
         }),
     }
+}
+
+pub(crate) fn default_http_cache_dir() -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
+            if !xdg.is_empty() {
+                return PathBuf::from(xdg).join("moli").join("http-cache");
+            }
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            if !home.is_empty() {
+                return PathBuf::from(home)
+                    .join(".cache")
+                    .join("moli")
+                    .join("http-cache");
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            if !home.is_empty() {
+                return PathBuf::from(home)
+                    .join("Library")
+                    .join("Caches")
+                    .join("moli")
+                    .join("http-cache");
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            if !local_app_data.is_empty() {
+                return PathBuf::from(local_app_data)
+                    .join("moli")
+                    .join("http-cache");
+            }
+        }
+    }
+    std::env::temp_dir().join("moli").join("http-cache")
 }
 
 #[cfg(test)]
