@@ -60,7 +60,7 @@ use crate::{
 };
 
 const DEFAULT_RUNTIME_TRANSFERS: usize = 256;
-const RUNTIME_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const RUNTIME_POLL_INTERVAL: Duration = Duration::from_millis(10);
 // curl-sys does not currently expose CURLINFO_HTTP_VERSION. This value is
 // CURLINFO_LONG + 46 in curl's public curl.h ABI.
 const CURLINFO_HTTP_VERSION: curl_sys::CURLINFO = curl_sys::CURLINFO_LONG + 46;

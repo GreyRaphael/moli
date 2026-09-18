@@ -3665,6 +3665,15 @@ impl RendererOwnerHandle {
                     self.enqueue_parked_turns_for_wake(token, parked_turns, pending_turns);
                     return;
                 }
+                if matches!(source, RendererOwnerWakeSource::NetworkingTask) {
+                    self.enqueue_page_turn_before_commands(
+                        token,
+                        PageTurnTrigger::producer(source),
+                        pending_turns,
+                    );
+                    self.enqueue_parked_turns_for_wake(token, parked_turns, pending_turns);
+                    return;
+                }
                 self.enqueue_page_turn(
                     token,
                     PageTurnTrigger::producer(source),
