@@ -24,8 +24,13 @@ fn node_scroll_position_value<'s>(
     horizontal: bool,
 ) -> Result<f64, moli_layout::LayoutError> {
     if let Ok((runtime_ptr, handle)) = node_runtime_and_handle_from_object(scope, object) {
+        let runtime = unsafe { &*runtime_ptr };
+        if !runtime.is_latest_layout_dom_fresh() {
+            let (left, top) = node_scroll_position(runtime, handle);
+            return Ok(if horizontal { left } else { top });
+        }
         let metrics = observable_element_metrics(
-            unsafe { &*runtime_ptr },
+            runtime,
             handle,
             moli_layout::LayoutFlushReason::SynchronousGeometry,
         )?;

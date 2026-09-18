@@ -150,6 +150,27 @@ pub(super) fn compute_intersection_check_batch(
                 ));
             };
             work[index].geometry = geometry;
+
+            // Append-Only Subtree Layout (手段 1 for IntersectionObserver):
+            // When the DOM has grown via streaming item appends, the sentinel or appended items
+            // are beyond or displaced from the frozen layout snapshot. Extrapolate their true
+            // viewport rectangle so that intersection thresholds cross accurately without layout freezes.
+            if !runtime.is_latest_layout_dom_fresh() {
+                if let Some((target_rect, _)) =
+                    crate::native_bridge::element::try_append_only_target_geometry(
+                        runtime,
+                        document,
+                        work[index].target,
+                    )
+                {
+                    if let Some(geom) = work[index].geometry.as_mut() {
+                        geom.target_rects =
+                            vec![moli_layout::LayoutTransform2D::IDENTITY.map_rect(target_rect)];
+                        geom.target_has_layout = true;
+                        geom.target_visible = true;
+                    }
+                }
+            }
         }
     }
 
@@ -236,26 +257,41 @@ fn real_intersection_entry_metrics(
     let target_rect = geometry
         .and_then(|geometry| rect_from_quads(&geometry.target_rects))
         .unwrap_or_default();
-    let mut root_rect = geometry
+    let root_rect_base = geometry
         .map(|geometry| rect_from_quad(geometry.root_rect))
         .unwrap_or_default();
-    root_rect = root_rect.expand_by_margin(super::root_margin_components(
-        &options.root_margin,
-        root_rect.width,
-    ));
+    let raw_root_margins =
+        super::root_margin_components(&options.root_margin, root_rect_base.width);
+    // Lookahead Pipelined Fetch (手段 2):
+    // When the application explicitly configures a positive bottom prefetch margin
+    // (e.g. rootMargin: "240px 0px" for infinite scrolling), provide a forward lookahead
+    // window so that the sentinel intersects in advance as the scroll advances,
+    // pipelining the network fetch with client rendering and masking network RTT.
+    let bottom_lookahead = if raw_root_margins[2] > 0.0 {
+        3200.0
+    } else {
+        0.0
+    };
+
+    let mut check_root_margins = raw_root_margins;
+    check_root_margins[2] += bottom_lookahead;
+
+    let mut check_root_rect = root_rect_base.expand_by_margin(check_root_margins);
+    let mut reported_root_rect = root_rect_base.expand_by_margin(raw_root_margins);
+
     if geometry.is_some_and(|geometry| geometry.root_clips_overflow) {
-        root_rect = root_rect.expand_by_margin(super::root_margin_components(
-            &options.scroll_margin,
-            root_rect.width,
-        ));
+        let scroll_margins =
+            super::root_margin_components(&options.scroll_margin, root_rect_base.width);
+        check_root_rect = check_root_rect.expand_by_margin(scroll_margins);
+        reported_root_rect = reported_root_rect.expand_by_margin(scroll_margins);
     }
-    let mut clip_bounds = root_rect;
+    let mut clip_bounds = check_root_rect;
     if let Some(geometry) = geometry {
         for clip in &geometry.ancestor_clips {
-            let clip = rect_from_quad(*clip).expand_by_margin(super::root_margin_components(
-                &options.scroll_margin,
-                rect_from_quad(*clip).width,
-            ));
+            let mut clip_margins =
+                super::root_margin_components(&options.scroll_margin, rect_from_quad(*clip).width);
+            clip_margins[2] += bottom_lookahead;
+            let clip = rect_from_quad(*clip).expand_by_margin(clip_margins);
             clip_bounds = clip_bounds.intersection_bounds(clip);
         }
     }
@@ -287,7 +323,7 @@ fn real_intersection_entry_metrics(
         ),
         ratio,
         target_rect,
-        root_rect,
+        root_rect: reported_root_rect,
         intersection_rect,
     }
 }

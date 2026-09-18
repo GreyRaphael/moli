@@ -205,7 +205,8 @@ fn execute_source_text_on_current_stack_with_completion(
     {
         unsafe { &mut *host_ptr }.register_compiled_string_provenance(provenance);
     }
-    let source =
+    let source_len = source.len();
+    let source_v8 =
         v8_string(&scope, source).ok_or_else(|| anyhow!("failed to allocate v8 source string"))?;
     let origin = provenance.map(|provenance| {
         create_script_origin_with_base_url_and_nonce(
@@ -216,14 +217,58 @@ fn execute_source_text_on_current_stack_with_completion(
             script_nonce,
         )
     });
-    let script = v8::Script::compile(&scope, source, origin.as_ref()).ok_or_else(|| {
-        let exception = scope.exception();
-        let message = scope.message();
-        let stack_trace = scope.stack_trace();
-        let report =
-            build_event_handler_exception_report(&mut scope, exception, message, stack_trace);
-        script_exception_error(&mut scope, report, "compile", report_target)
-    })?;
+    let code_cache_path = provenance
+        .and_then(|p| super::v8_code_cache::code_cache_path_for_url(p.source_url(), source_len));
+
+    let mut cached_bytes = None;
+    if let Some(ref path) = code_cache_path {
+        if let Ok(bytes) = std::fs::read(path) {
+            cached_bytes = Some(bytes);
+        }
+    }
+
+    let mut used_cache = false;
+    let mut compiled_script = None;
+    if let Some(ref bytes) = cached_bytes {
+        let cached_data = v8::script_compiler::CachedData::new(bytes);
+        let mut source_obj = v8::script_compiler::Source::new_with_cached_data(
+            source_v8,
+            origin.as_ref(),
+            cached_data,
+        );
+        if let Some(compiled) = v8::script_compiler::compile(
+            &scope,
+            &mut source_obj,
+            v8::script_compiler::CompileOptions::ConsumeCodeCache,
+            v8::script_compiler::NoCacheReason::NoReason,
+        ) {
+            let rejected = source_obj.get_cached_data().is_some_and(|cd| cd.rejected());
+            if !rejected {
+                compiled_script = Some(compiled);
+                used_cache = true;
+            } else if let Some(ref path) = code_cache_path {
+                let _ = std::fs::remove_file(path);
+            }
+        } else {
+            scope.reset();
+            if let Some(ref path) = code_cache_path {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    let script = if let Some(compiled) = compiled_script {
+        compiled
+    } else {
+        v8::Script::compile(&scope, source_v8, origin.as_ref()).ok_or_else(|| {
+            let exception = scope.exception();
+            let message = scope.message();
+            let stack_trace = scope.stack_trace();
+            let report =
+                build_event_handler_exception_report(&mut scope, exception, message, stack_trace);
+            script_exception_error(&mut scope, report, "compile", report_target)
+        })?
+    };
     let previous_continuation_data = scope.get_continuation_preserved_embedder_data();
     if let Some(provenance) = provenance
         && let Some(value) =
@@ -240,6 +285,12 @@ fn execute_source_text_on_current_stack_with_completion(
     let run_result = crate::script_execution::execute_compiled_script(&mut scope, script);
     let watchdog_timed_out = watchdog.disarm() == V8ExecutionWatchdogOutcome::TimedOut;
     scope.set_continuation_preserved_embedder_data(previous_continuation_data);
+    if !used_cache
+        && run_result.is_some()
+        && let Some(ref path) = code_cache_path
+    {
+        super::v8_code_cache::save_script_code_cache(&scope, script, path);
+    }
     let value = run_result.ok_or_else(|| {
         if watchdog_timed_out {
             return RawScriptExecutionError::Internal(anyhow!(

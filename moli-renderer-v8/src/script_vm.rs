@@ -715,6 +715,7 @@ mod indexed_db_task_body;
 mod input_dispatch;
 mod input_helpers;
 mod inspector;
+pub(crate) mod v8_code_cache;
 pub(crate) use inspector::{dispatch_inspector_io_owner_wake, dispatch_inspector_main_owner_wake};
 mod isolated_worlds;
 mod main_document_lifecycle;

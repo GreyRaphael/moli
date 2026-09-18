@@ -3348,32 +3348,79 @@ impl ScriptVm {
                     source_url.as_str(),
                     fetch_metadata,
                 );
-                let mut compiler_source =
-                    v8::script_compiler::Source::new(source_string, Some(&origin));
-                let module = v8::script_compiler::compile_module(&scope, &mut compiler_source)
-                    .ok_or_else(|| {
-                        let exception = scope
-                            .exception()
-                            .and_then(|exception| exception.to_detail_string(&scope))
-                            .map(|message| message.to_rust_string_lossy(&scope))
-                            .or_else(|| {
-                                scope.message().map(|message| {
-                                    message.get(&scope).to_rust_string_lossy(&scope)
+
+                let code_cache_path =
+                    super::v8_code_cache::code_cache_path_for_url(source_url, source.len());
+                let mut cached_bytes = None;
+                if let Some(ref path) = code_cache_path {
+                    if let Ok(bytes) = std::fs::read(path) {
+                        cached_bytes = Some(bytes);
+                    }
+                }
+
+                let mut used_cache = false;
+                let mut compiled_module = None;
+                if let Some(ref bytes) = cached_bytes {
+                    let cached_data = v8::script_compiler::CachedData::new(bytes);
+                    let mut compiler_source = v8::script_compiler::Source::new_with_cached_data(
+                        source_string,
+                        Some(&origin),
+                        cached_data,
+                    );
+                    if let Some(module) = v8::script_compiler::compile_module2(
+                        &scope,
+                        &mut compiler_source,
+                        v8::script_compiler::CompileOptions::ConsumeCodeCache,
+                        v8::script_compiler::NoCacheReason::NoReason,
+                    ) {
+                        let rejected = compiler_source
+                            .get_cached_data()
+                            .is_some_and(|cd| cd.rejected());
+                        if !rejected {
+                            compiled_module = Some(module);
+                            used_cache = true;
+                        } else if let Some(ref path) = code_cache_path {
+                            let _ = std::fs::remove_file(path);
+                        }
+                    } else {
+                        scope.reset();
+                    }
+                }
+
+                let module = if let Some(module) = compiled_module {
+                    module
+                } else {
+                    let mut compiler_source =
+                        v8::script_compiler::Source::new(source_string, Some(&origin));
+                    let module = v8::script_compiler::compile_module(&scope, &mut compiler_source)
+                        .ok_or_else(|| {
+                            let exception = scope
+                                .exception()
+                                .and_then(|exception| exception.to_detail_string(&scope))
+                                .map(|message| message.to_rust_string_lossy(&scope))
+                                .or_else(|| {
+                                    scope.message().map(|message| {
+                                        message.get(&scope).to_rust_string_lossy(&scope)
+                                    })
                                 })
-                            })
-                            .unwrap_or_else(|| {
-                                format!(
-                                    "unknown compile exception (caught={}, can_continue={}, terminated={})",
-                                    scope.has_caught(),
-                                    scope.can_continue(),
-                                    scope.has_terminated()
-                                )
-                            });
-                        anyhow::anyhow!(
-                            "v8 failed to compile native module `{source_url}`: {}",
-                            exception
-                        )
-                    })?;
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "unknown compile exception (caught={}, can_continue={}, terminated={})",
+                                        scope.has_caught(),
+                                        scope.can_continue(),
+                                        scope.has_terminated()
+                                    )
+                                });
+                            anyhow::anyhow!(
+                                "v8 failed to compile native module `{source_url}`: {}",
+                                exception
+                            )
+                        })?;
+                    if !used_cache && let Some(ref path) = code_cache_path {
+                        super::v8_code_cache::save_module_code_cache(&scope, module, path);
+                    }
+                    module
+                };
                 let requests = collect_module_requests(&mut scope, module)?;
                 let identity = module_identity_hash_from_v8_module(module);
                 let compiled_module = v8::Global::new(scope.as_ref(), module);

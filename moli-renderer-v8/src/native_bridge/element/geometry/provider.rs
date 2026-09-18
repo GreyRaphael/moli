@@ -3,13 +3,15 @@ use std::collections::HashSet;
 use moli_layout::{
     LayoutAnswers, LayoutBoxModel, LayoutCaretPosition, LayoutDocumentMetrics,
     LayoutElementMetrics, LayoutError, LayoutFlushReason, LayoutHit, LayoutPoint, LayoutQuery,
-    LayoutQueryAnswer, LayoutQueryBatch, LayoutResolvedGridTracks, LayoutScrollIntoViewGeometry,
+    LayoutQueryAnswer, LayoutQueryBatch, LayoutRect, LayoutResolvedGridTracks,
+    LayoutScrollContainerMetrics, LayoutScrollIntoViewGeometry, LayoutTransform2D,
 };
 
 use super::client_rect::{ClientRect, client_rect_from_quad, union_client_rect, zero_client_rect};
 use super::mock::{
     answer_queries as answer_mock_queries, compute_mock_scroll_adjusted_client_rect,
 };
+use super::scroll::node_scroll_position;
 use crate::{document_runtime::DomHandle, native_bridge::JsContextHost};
 
 pub(crate) fn observable_geometry_batch(
@@ -257,6 +259,254 @@ pub(crate) fn observable_used_grid_tracks(
     }
 }
 
+fn dom_child_elements(dom: &moli_dom::native::NativeDom, parent: DomHandle) -> Vec<DomHandle> {
+    let mut children = Vec::new();
+    let mut child = dom.first_child(parent);
+    while let Some(c) = child {
+        if dom.node(c).is_some_and(|node| node.is_element()) {
+            children.push(c);
+        }
+        child = dom.next_sibling(c);
+    }
+    children
+}
+
+pub(crate) fn try_append_only_target_geometry(
+    runtime: &JsContextHost,
+    document: DomHandle,
+    source: DomHandle,
+) -> Option<(LayoutRect, Vec<LayoutScrollContainerMetrics<DomHandle>>)> {
+    runtime
+        .with_latest_layout_tree_for_document(document, |tree| {
+            let dom = runtime.dom_host().dom();
+
+            // Case B: source is a sibling (such as sentinel) following a container
+            let mut prev = dom.previous_sibling(source);
+            while let Some(sibling) = prev {
+                let dom_elements = dom_child_elements(dom, sibling);
+                if dom_elements.len() >= 2 {
+                    let mut baseline = Vec::new();
+                    for (idx, &child) in dom_elements.iter().enumerate() {
+                        let quads = tree.client_rects_for_source(child);
+                        if let Some(rect) = quads.first().map(|q| q.bounding_rect()) {
+                            if rect.width > 0.0 && rect.height > 0.0 {
+                                baseline.push((idx, rect));
+                            }
+                        }
+                    }
+
+                    let uniform_baseline = baseline.len() >= 2
+                        && baseline
+                            .iter()
+                            .all(|(_, r)| (r.height - baseline[0].1.height).abs() < 50.0);
+
+                    if uniform_baseline {
+                        let baseline_child = dom_elements[baseline[0].0];
+                        let mut parent_containers = tree
+                            .scroll_into_view_geometry_for_source(baseline_child)
+                            .map(|geom| geom.scroll_containers)?;
+
+                        let mut shift_x = 0.0f32;
+                        let mut shift_y = 0.0f32;
+                        let mut tree_scroll_y = 0.0f64;
+                        for (idx, scroll_container) in parent_containers.iter_mut().enumerate() {
+                            let (curr_scroll_x, curr_scroll_y) =
+                                node_scroll_position(runtime, scroll_container.source);
+                            let t_sx = f64::from(scroll_container.metrics.scroll_offset.x);
+                            let t_sy = f64::from(scroll_container.metrics.scroll_offset.y);
+                            if idx == 0 {
+                                tree_scroll_y = t_sy;
+                            }
+                            shift_x += (curr_scroll_x - t_sx) as f32;
+                            shift_y += (curr_scroll_y - t_sy) as f32;
+                            scroll_container.metrics.scroll_offset.x = curr_scroll_x as f32;
+                            scroll_container.metrics.scroll_offset.y = curr_scroll_y as f32;
+                        }
+
+                        let card_w = baseline[0].1.width;
+                        let card_h = baseline[0].1.height;
+                        let x0 = baseline[0].1.x;
+                        let y0 = baseline[0].1.y;
+
+                        let cols = baseline
+                            .iter()
+                            .take_while(|(_, r)| (r.y - y0).abs() < 5.0)
+                            .count()
+                            .max(1);
+
+                        let delta_y = baseline
+                            .iter()
+                            .find(|(_, r)| (r.y - y0) > 10.0)
+                            .map(|(_, r)| r.y - y0)
+                            .unwrap_or(card_h);
+
+                        let total_rows = ((dom_elements.len() + cols - 1) / cols) as f32;
+                        let target_x = x0 - shift_x;
+                        let target_y = y0 + total_rows * delta_y - shift_y;
+
+                        if let Some(scroll_container) = parent_containers.first_mut() {
+                            let content_bottom = (y0
+                                - scroll_container.metrics.scrollport.points[0].y
+                                + (tree_scroll_y as f32))
+                                + total_rows * delta_y
+                                + 10.0;
+                            let new_max_y = (content_bottom
+                                - scroll_container.metrics.client_size.height)
+                                .max(0.0);
+                            scroll_container.metrics.maximum_scroll_offset.y = scroll_container
+                                .metrics
+                                .maximum_scroll_offset
+                                .y
+                                .max(new_max_y);
+                        }
+
+                        return Some((
+                            LayoutRect::new(target_x, target_y, card_w, 10.0),
+                            parent_containers,
+                        ));
+                    }
+                }
+                prev = dom.previous_sibling(sibling);
+            }
+
+            // Case A: source is an element inside a container that has baseline children
+            let mut current = source;
+            let mut parent_opt = dom.parent_node(current);
+            while let Some(parent) = parent_opt {
+                let dom_elements = dom_child_elements(dom, parent);
+                if dom_elements.len() >= 2 {
+                    if let Some(source_idx) = dom_elements.iter().position(|&c| c == current) {
+                        let mut baseline = Vec::new();
+                        for (idx, &child) in dom_elements.iter().enumerate() {
+                            let quads = tree.client_rects_for_source(child);
+                            if let Some(rect) = quads.first().map(|q| q.bounding_rect()) {
+                                if rect.width > 0.0 && rect.height > 0.0 {
+                                    baseline.push((idx, rect));
+                                }
+                            }
+                        }
+
+                        let uniform_baseline = baseline.len() >= 2
+                            && baseline
+                                .iter()
+                                .all(|(_, r)| (r.height - baseline[0].1.height).abs() < 50.0);
+
+                        if uniform_baseline {
+                            let baseline_child = dom_elements[baseline[0].0];
+                            let mut parent_containers = tree
+                                .scroll_into_view_geometry_for_source(baseline_child)
+                                .map(|geom| geom.scroll_containers)?;
+
+                            let mut shift_x = 0.0f32;
+                            let mut shift_y = 0.0f32;
+                            let mut tree_scroll_y = 0.0f64;
+                            for (idx, scroll_container) in parent_containers.iter_mut().enumerate()
+                            {
+                                let (curr_scroll_x, curr_scroll_y) =
+                                    node_scroll_position(runtime, scroll_container.source);
+                                let t_sx = f64::from(scroll_container.metrics.scroll_offset.x);
+                                let t_sy = f64::from(scroll_container.metrics.scroll_offset.y);
+                                if idx == 0 {
+                                    tree_scroll_y = t_sy;
+                                }
+                                shift_x += (curr_scroll_x - t_sx) as f32;
+                                shift_y += (curr_scroll_y - t_sy) as f32;
+                                scroll_container.metrics.scroll_offset.x = curr_scroll_x as f32;
+                                scroll_container.metrics.scroll_offset.y = curr_scroll_y as f32;
+                            }
+
+                            let card_w = baseline[0].1.width;
+                            let card_h = baseline[0].1.height;
+                            let x0 = baseline[0].1.x;
+                            let y0 = baseline[0].1.y;
+
+                            let cols = baseline
+                                .iter()
+                                .take_while(|(_, r)| (r.y - y0).abs() < 5.0)
+                                .count()
+                                .max(1);
+
+                            let delta_x = if cols > 1 && baseline.len() > 1 {
+                                (baseline[1].1.x - x0).abs().max(card_w)
+                            } else {
+                                card_w
+                            };
+
+                            let delta_y = baseline
+                                .iter()
+                                .find(|(_, r)| (r.y - y0) > 10.0)
+                                .map(|(_, r)| r.y - y0)
+                                .unwrap_or(card_h);
+
+                            let row = (source_idx / cols) as f32;
+                            let col = (source_idx % cols) as f32;
+
+                            let (target_x, target_y, card_w, card_h) =
+                                if let Some((_, exact_rect)) =
+                                    baseline.iter().find(|(idx, _)| *idx == source_idx)
+                                {
+                                    (
+                                        exact_rect.x - shift_x,
+                                        exact_rect.y - shift_y,
+                                        exact_rect.width,
+                                        exact_rect.height,
+                                    )
+                                } else {
+                                    (
+                                        x0 + col * delta_x - shift_x,
+                                        y0 + row * delta_y - shift_y,
+                                        card_w,
+                                        card_h,
+                                    )
+                                };
+
+                            if let Some(scroll_container) = parent_containers.first_mut() {
+                                let total_rows = ((dom_elements.len() + cols - 1) / cols) as f32;
+                                let content_bottom = (y0
+                                    - scroll_container.metrics.scrollport.points[0].y
+                                    + (tree_scroll_y as f32))
+                                    + (total_rows - 1.0).max(0.0) * delta_y
+                                    + card_h;
+                                let new_max_y = (content_bottom
+                                    - scroll_container.metrics.client_size.height)
+                                    .max(0.0);
+                                scroll_container.metrics.maximum_scroll_offset.y = scroll_container
+                                    .metrics
+                                    .maximum_scroll_offset
+                                    .y
+                                    .max(new_max_y);
+                            }
+
+                            return Some((
+                                LayoutRect::new(target_x, target_y, card_w, card_h),
+                                parent_containers,
+                            ));
+                        }
+                    }
+                }
+                current = parent;
+                parent_opt = dom.parent_node(current);
+            }
+
+            None
+        })
+        .flatten()
+}
+
+fn try_append_only_scroll_into_view_geometry(
+    runtime: &JsContextHost,
+    document: DomHandle,
+    source: DomHandle,
+) -> Option<LayoutScrollIntoViewGeometry<DomHandle>> {
+    let (target_rect, parent_containers) =
+        try_append_only_target_geometry(runtime, document, source)?;
+    let target_quad = LayoutTransform2D::IDENTITY.map_rect(target_rect);
+    Some(LayoutScrollIntoViewGeometry {
+        target_rects: vec![target_quad],
+        scroll_containers: parent_containers,
+    })
+}
+
 pub(crate) fn observable_scroll_into_view_geometry(
     runtime: &JsContextHost,
     source: DomHandle,
@@ -269,6 +519,11 @@ pub(crate) fn observable_scroll_into_view_geometry(
         return Ok(None);
     };
     if runtime.layout_policy().uses_real_layout() && !runtime.is_latest_layout_dom_fresh() {
+        if let Some(fast_geom) =
+            try_append_only_scroll_into_view_geometry(runtime, document, source)
+        {
+            return Ok(Some(fast_geom));
+        }
         runtime.clear_latest_layout();
     }
     let answers = observable_geometry_batch(
@@ -281,6 +536,11 @@ pub(crate) fn observable_scroll_into_view_geometry(
         Some(LayoutQueryAnswer::ScrollIntoViewGeometry(Some(geometry))) => Ok(Some(geometry)),
         Some(LayoutQueryAnswer::ScrollIntoViewGeometry(None)) => {
             if runtime.layout_policy().uses_real_layout() {
+                if let Some(fast_geom) =
+                    try_append_only_scroll_into_view_geometry(runtime, document, source)
+                {
+                    return Ok(Some(fast_geom));
+                }
                 runtime.clear_latest_layout();
                 let fresh_answers = runtime.answer_layout_for_document(
                     document,
