@@ -262,13 +262,18 @@ fn real_intersection_entry_metrics(
         .unwrap_or_default();
     let raw_root_margins =
         super::root_margin_components(&options.root_margin, root_rect_base.width);
-    // Lookahead Pipelined Fetch (手段 2):
-    // When the application explicitly configures a positive bottom prefetch margin
-    // (e.g. rootMargin: "240px 0px" for infinite scrolling), provide a forward lookahead
-    // window so that the sentinel intersects in advance as the scroll advances,
-    // pipelining the network fetch with client rendering and masking network RTT.
-    let bottom_lookahead = if raw_root_margins[2] > 0.0 {
-        3200.0
+    // Dynamic Lookahead Pipelined Fetch (手段 2 演化版: 建议 1 + 建议 2):
+    // 1. 严格限定哨兵模式: 仅当 thresholds 为单项且为 0.0 时 (纯相交触底探测), 排除多阈值动画/视频/精确比例场景
+    // 2. 意图探测: 仅当应用主动配置了正向 bottom margin (意图为预加载) 时生效
+    // 3. 动态高度自适应: 基于视口/容器实际高度计算 (height * 4.0).clamp(600.0, 3200.0), 避免小容器/移动端过度拉取
+    let is_sentinel_mode = options.thresholds.len() == 1 && options.thresholds[0] == 0.0;
+    let bottom_lookahead = if raw_root_margins[2] > 0.0 && is_sentinel_mode {
+        let base_height = if root_rect_base.height > 0.0 {
+            root_rect_base.height
+        } else {
+            800.0
+        };
+        (base_height * 4.0).clamp(600.0, 3200.0)
     } else {
         0.0
     };
