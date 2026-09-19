@@ -3,6 +3,7 @@
 mod dns_adapter;
 mod http;
 mod runtime;
+mod share;
 mod tls;
 pub mod websocket;
 

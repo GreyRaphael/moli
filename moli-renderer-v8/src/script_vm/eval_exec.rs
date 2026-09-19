@@ -220,12 +220,9 @@ fn execute_source_text_on_current_stack_with_completion(
     let code_cache_path = provenance
         .and_then(|p| super::v8_code_cache::code_cache_path_for_url(p.source_url(), source_len));
 
-    let mut cached_bytes = None;
-    if let Some(ref path) = code_cache_path {
-        if let Ok(bytes) = std::fs::read(path) {
-            cached_bytes = Some(bytes);
-        }
-    }
+    let cached_bytes = code_cache_path
+        .as_deref()
+        .and_then(super::v8_code_cache::get_code_cache);
 
     let mut used_cache = false;
     let mut compiled_script = None;
@@ -247,12 +244,12 @@ fn execute_source_text_on_current_stack_with_completion(
                 compiled_script = Some(compiled);
                 used_cache = true;
             } else if let Some(ref path) = code_cache_path {
-                let _ = std::fs::remove_file(path);
+                super::v8_code_cache::invalidate_code_cache(path);
             }
         } else {
             scope.reset();
             if let Some(ref path) = code_cache_path {
-                let _ = std::fs::remove_file(path);
+                super::v8_code_cache::invalidate_code_cache(path);
             }
         }
     }

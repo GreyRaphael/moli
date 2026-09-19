@@ -12,6 +12,7 @@ use super::{
 use crate::{
     CurlMultiRuntimeConfig, CurlTransferId,
     dns_adapter::{CurlDnsOwnerCompletion, CurlDnsOwnerResidence, CurlDnsReady},
+    share::CurlShare,
 };
 use anyhow::{Context, Result, anyhow};
 use crossbeam_channel::{Receiver, Sender};
@@ -33,6 +34,7 @@ pub(crate) struct HttpRegistry<H: Handler, C> {
     pending: VecDeque<CurlPendingJob<H, C>>,
     dns: CurlDnsOwnerResidence<CurlTransferId, CurlPendingJob<H, C>>,
     active: HashMap<CurlTransferId, CurlActiveTransfer<H, C>>,
+    share: Option<CurlShare>,
 }
 
 impl<H: Handler, C> HttpRegistry<H, C> {
@@ -47,6 +49,7 @@ impl<H: Handler, C> HttpRegistry<H, C> {
             pending: VecDeque::new(),
             dns: CurlDnsOwnerResidence::default(),
             active: HashMap::new(),
+            share: CurlShare::new(),
         }
     }
 
@@ -168,7 +171,13 @@ impl<H: Handler, C> HttpRegistry<H, C> {
             });
         }
         for (transfer_id, active) in self.active.drain() {
-            let easy = multi.remove2(active.handle).ok();
+            let easy = match multi.remove2(active.handle) {
+                Ok(mut easy) => {
+                    CurlShare::detach(&mut easy);
+                    Some(easy)
+                }
+                Err(_) => None,
+            };
             let _ = self.completion_tx.send(CurlMultiCompletion {
                 transfer_id,
                 easy,
@@ -306,6 +315,9 @@ impl<H: Handler, C> HttpRegistry<H, C> {
                 return;
             }
         }
+        if let Some(ref share) = self.share {
+            share.attach(&mut job.easy);
+        }
         match multi
             .add2(job.easy)
             .with_context(|| anyhow!("failed to add curl easy handle for {label}"))
@@ -396,7 +408,10 @@ impl<H: Handler, C> HttpRegistry<H, C> {
         result: Result<()>,
     ) {
         let easy = match multi.remove2(active.handle) {
-            Ok(easy) => Some(easy),
+            Ok(mut easy) => {
+                CurlShare::detach(&mut easy);
+                Some(easy)
+            }
             Err(error) => {
                 self.send_completion(CurlMultiCompletion {
                     transfer_id,

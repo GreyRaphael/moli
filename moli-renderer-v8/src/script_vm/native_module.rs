@@ -3351,12 +3351,9 @@ impl ScriptVm {
 
                 let code_cache_path =
                     super::v8_code_cache::code_cache_path_for_url(source_url, source.len());
-                let mut cached_bytes = None;
-                if let Some(ref path) = code_cache_path {
-                    if let Ok(bytes) = std::fs::read(path) {
-                        cached_bytes = Some(bytes);
-                    }
-                }
+                let cached_bytes = code_cache_path
+                    .as_deref()
+                    .and_then(super::v8_code_cache::get_code_cache);
 
                 let mut used_cache = false;
                 let mut compiled_module = None;
@@ -3380,10 +3377,13 @@ impl ScriptVm {
                             compiled_module = Some(module);
                             used_cache = true;
                         } else if let Some(ref path) = code_cache_path {
-                            let _ = std::fs::remove_file(path);
+                            super::v8_code_cache::invalidate_code_cache(path);
                         }
                     } else {
                         scope.reset();
+                        if let Some(ref path) = code_cache_path {
+                            super::v8_code_cache::invalidate_code_cache(path);
+                        }
                     }
                 }
 
