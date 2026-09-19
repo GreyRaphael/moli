@@ -128,6 +128,7 @@ struct BrowserResourceRuntimeInner {
     client: FetchClientHandle,
     memory_cache: Mutex<SharedMemoryResourceCache>,
     detached_keepalive_loads: DetachedKeepaliveLoadRegistry,
+    cors_preflight_cache: Arc<crate::network_host::cors_cache::CorsPreflightCache>,
 }
 
 impl BrowserResourceRuntimeOwner {
@@ -149,6 +150,9 @@ impl BrowserResourceRuntimeOwner {
                 client: fetch_owner.handle(),
                 memory_cache: Mutex::new(SharedMemoryResourceCache::default()),
                 detached_keepalive_loads: DetachedKeepaliveLoadRegistry::default(),
+                cors_preflight_cache: Arc::new(
+                    crate::network_host::cors_cache::CorsPreflightCache::default(),
+                ),
             }),
         };
         let owner = Self {
@@ -201,6 +205,12 @@ impl BrowserResourceRuntime {
 
     pub fn runtime_id_for_diagnostics(&self) -> u64 {
         self.inner.id
+    }
+
+    pub(crate) fn cors_preflight_cache(
+        &self,
+    ) -> Arc<crate::network_host::cors_cache::CorsPreflightCache> {
+        self.inner.cors_preflight_cache.clone()
     }
 
     pub fn memory_cache_diagnostics(&self) -> SharedMemoryResourceCacheDiagnostics {

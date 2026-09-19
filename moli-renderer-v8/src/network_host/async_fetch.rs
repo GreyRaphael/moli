@@ -411,15 +411,53 @@ async fn run_cors_preflight_if_needed(
             preflight_request_headers,
         )
     {
+        let cors_cache = loader.cors_preflight_cache();
+        let origin_str = request.serialized_origin();
+
+        if cors_cache.check(
+            &origin_str,
+            &request.url,
+            request.credentials_mode,
+            &request.method,
+            preflight_request_headers,
+        ) {
+            return Ok(());
+        }
+
+        loop {
+            match cors_cache.register_or_wait(&origin_str, &request.url, request.credentials_mode) {
+                crate::network_host::cors_cache::InFlightAction::Wait(mut rx) => {
+                    let _ = rx.wait_for(|&done| done).await;
+                    if cors_cache.check(
+                        &origin_str,
+                        &request.url,
+                        request.credentials_mode,
+                        &request.method,
+                        preflight_request_headers,
+                    ) {
+                        return Ok(());
+                    }
+                }
+                crate::network_host::cors_cache::InFlightAction::Execute => {
+                    break;
+                }
+            }
+        }
+
         let observable_preflight_headers = preflight_headers.clone();
-        let mut preflight_request = Request::new_browser_bytes(
+        let mut preflight_request = match Request::new_browser_bytes(
             "OPTIONS",
             request.url.as_str(),
             None,
             preflight_headers,
             request_origin.clone(),
-        )
-        .map_err(|error| format!("cors preflight: failed to build request: {error}"))?
+        ) {
+            Ok(req) => req,
+            Err(error) => {
+                cors_cache.finish_in_flight(&origin_str, &request.url, request.credentials_mode);
+                return Err(format!("cors preflight: failed to build request: {error}"));
+            }
+        }
         // Preflight performs one HTTP exchange; a redirect is a
         // non-ok response, never another OPTIONS request.
         .with_redirect_mode(RequestRedirectMode::Manual)
@@ -445,6 +483,7 @@ async fn run_cors_preflight_if_needed(
         {
             Ok(response) => response,
             Err(error) => {
+                cors_cache.finish_in_flight(&origin_str, &request.url, request.credentials_mode);
                 if let Some(observer) = preflight_observer {
                     observer.send_preflight_failure(
                         request.url.clone(),
@@ -462,14 +501,26 @@ async fn run_cors_preflight_if_needed(
                 &preflight_response,
             );
         }
-        validate_cors_preflight_response(
-            &request.serialized_origin(),
+        let validation_res = validate_cors_preflight_response(
+            &origin_str,
             request.credentials_mode,
             &request.method,
             preflight_request_headers,
             preflight_response.status,
             &preflight_response.headers,
-        )?;
+        );
+
+        if validation_res.is_ok() {
+            cors_cache.record(
+                &origin_str,
+                &request.url,
+                request.credentials_mode,
+                &preflight_response.headers,
+            );
+        }
+
+        cors_cache.finish_in_flight(&origin_str, &request.url, request.credentials_mode);
+        validation_res?;
     }
     Ok(())
 }

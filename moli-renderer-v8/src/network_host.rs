@@ -4,6 +4,7 @@ mod bindings;
 mod body;
 mod body_source;
 mod browser_response;
+pub(crate) mod cors_cache;
 mod csp_reports;
 mod event_source;
 mod fetch;

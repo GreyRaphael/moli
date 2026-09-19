@@ -64,6 +64,12 @@ impl ResourceRequestClient {
         self.resource_runtime.clone()
     }
 
+    pub(crate) fn cors_preflight_cache(
+        &self,
+    ) -> std::sync::Arc<crate::network_host::cors_cache::CorsPreflightCache> {
+        self.resource_runtime.cors_preflight_cache()
+    }
+
     pub(crate) fn replace_browser_resource_runtime(
         &mut self,
         resource_runtime: BrowserResourceRuntime,
