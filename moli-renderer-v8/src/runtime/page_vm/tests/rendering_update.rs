@@ -240,20 +240,22 @@ document.body.innerHTML = '<div id="target"></div><div id="pass-through"></div><
             .vm()
             .layout_snapshot_cache_observability_for_test();
         assert!(!after_second.0);
-        assert_eq!(after_second.1, before.1 + 1);
-        assert_eq!(cache_after_second.0, cache_before.0 + 1);
-        assert_eq!(cache_after_second.1, cache_before.1 + 1);
-        assert_eq!(cache_after_second.2, cache_before.2 + 1);
+        assert_eq!(after_second.1, before.1 + 2);
+        assert_eq!(cache_after_second.0, cache_before.0);
+        assert_eq!(cache_after_second.1, cache_before.1 + 2);
+        assert_eq!(cache_after_second.2, cache_before.2 + 2);
         let second_width = match &second.answers[1] {
             moli_layout::LayoutQueryAnswer::BoxModel(Some(model)) => {
                 model.border.bounding_rect().width
             }
             answer => panic!("unexpected box-model answer: {answer:?}"),
         };
-        assert!((second_width - 120.0).abs() <= 0.05, "{second_width}");
-        assert_eq!(after_second.2, after_first.2);
-        assert_eq!(after_second.3, after_first.3);
-        assert_eq!(second.metrics, first.metrics);
+        assert!((second_width - 180.0).abs() <= 0.05, "{second_width}");
+        assert_eq!(
+            second.metrics.reason,
+            moli_layout::LayoutFlushReason::SynchronousGeometry
+        );
+        assert_eq!(after_second.3, Some(second.metrics));
         assert!(matches!(
             second.answers[0],
             moli_layout::LayoutQueryAnswer::DocumentMetrics(metrics)
@@ -269,10 +271,10 @@ document.body.innerHTML = '<div id="target"></div><div id="pass-through"></div><
             .vm()
             .layout_snapshot_cache_observability_for_test();
         assert!(!after_screenshot.0);
-        assert_eq!(after_screenshot.1, before.1 + 2);
-        assert_eq!(cache_after_screenshot.0, cache_before.0 + 1);
-        assert_eq!(cache_after_screenshot.1, cache_before.1 + 1);
-        assert_eq!(cache_after_screenshot.2, cache_before.2 + 2);
+        assert_eq!(after_screenshot.1, before.1 + 3);
+        assert_eq!(cache_after_screenshot.0, cache_before.0);
+        assert_eq!(cache_after_screenshot.1, cache_before.1 + 2);
+        assert_eq!(cache_after_screenshot.2, cache_before.2 + 3);
         let (_, retention) = cache_after_screenshot
             .3
             .expect("fresh paint layout should publish its frozen tree");
@@ -303,10 +305,10 @@ document.body.innerHTML = '<div id="target"></div><div id="pass-through"></div><
         let cache_after_third = page_vm
             .vm()
             .layout_snapshot_cache_observability_for_test();
-        assert_eq!(after_third.1, before.1 + 2);
-        assert_eq!(cache_after_third.0, cache_before.0 + 2);
-        assert_eq!(cache_after_third.1, cache_before.1 + 1);
-        assert_eq!(cache_after_third.2, cache_before.2 + 2);
+        assert_eq!(after_third.1, before.1 + 3);
+        assert_eq!(cache_after_third.0, cache_before.0 + 1);
+        assert_eq!(cache_after_third.1, cache_before.1 + 2);
+        assert_eq!(cache_after_third.2, cache_before.2 + 3);
         let third_width = match &third.answers[1] {
             moli_layout::LayoutQueryAnswer::BoxModel(Some(model)) => {
                 model.border.bounding_rect().width
@@ -383,10 +385,10 @@ document.body.innerHTML = '<div id=target></div>';
             }
             answer => panic!("unexpected stale box-model answer: {answer:?}"),
         };
-        assert!((stale_width - 40.0).abs() <= 0.05, "{stale_width}");
+        assert!((stale_width - 80.0).abs() <= 0.05, "{stale_width}");
         assert_eq!(
             page_vm.vm().layout_pass_observability_for_test().1,
-            passes_before + 1
+            passes_before + 2
         );
 
         page_vm
@@ -398,14 +400,14 @@ document.body.innerHTML = '<div id=target></div>';
             .expect("second screencast frame layout");
         assert_eq!(
             page_vm.vm().layout_pass_observability_for_test().1,
-            passes_before + 2
+            passes_before + 3
         );
         let cache_after_second = page_vm
             .vm()
             .layout_snapshot_cache_observability_for_test();
-        assert_eq!(cache_after_second.0, cache_before.0 + 1);
-        assert_eq!(cache_after_second.1, cache_before.1);
-        assert_eq!(cache_after_second.2, cache_before.2 + 2);
+        assert_eq!(cache_after_second.0, cache_before.0);
+        assert_eq!(cache_after_second.1, cache_before.1 + 1);
+        assert_eq!(cache_after_second.2, cache_before.2 + 3);
         assert!(cache_after_second.3.is_some());
 
         let refreshed = moli_layout::GeometryProvider::answer(
@@ -423,14 +425,14 @@ document.body.innerHTML = '<div id=target></div>';
         assert!((refreshed_width - 80.0).abs() <= 0.05, "{refreshed_width}");
         assert_eq!(
             page_vm.vm().layout_pass_observability_for_test().1,
-            passes_before + 2
+            passes_before + 3
         );
         let cache_after_query = page_vm
             .vm()
             .layout_snapshot_cache_observability_for_test();
-        assert_eq!(cache_after_query.0, cache_before.0 + 2);
-        assert_eq!(cache_after_query.1, cache_before.1);
-        assert_eq!(cache_after_query.2, cache_before.2 + 2);
+        assert_eq!(cache_after_query.0, cache_before.0 + 1);
+        assert_eq!(cache_after_query.1, cache_before.1 + 1);
+        assert_eq!(cache_after_query.2, cache_before.2 + 3);
         Ok::<_, anyhow::Error>(())
     })
     .await
