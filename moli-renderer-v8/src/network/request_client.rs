@@ -30,8 +30,8 @@ use super::{
 
 #[derive(Clone)]
 pub struct ResourceRequestClient {
-    resource_runtime: BrowserResourceRuntime,
-    page_network_policy: PageNetworkPolicy,
+    pub(super) resource_runtime: BrowserResourceRuntime,
+    pub(super) page_network_policy: PageNetworkPolicy,
     browser_site_context: Option<Arc<BrowserCookieFacadeContext>>,
 }
 
@@ -421,6 +421,9 @@ impl ResourceRequestClient {
             .lock()
             .complete_script_text(&key, &load, &cache_request, &result);
         load.finish(result.clone());
+        if let Ok(ref response) = result {
+            self.speculatively_prefetch_script_dependencies(&cache_request, response);
+        }
         result.map_err(anyhow::Error::msg)
     }
 
@@ -605,6 +608,7 @@ impl ResourceRequestClient {
             request,
             cancel_handle,
             move |result| {
+                let success_response = result.as_ref().ok().cloned();
                 let result = result.map_err(|error| format!("{error:#}"));
                 request_client
                     .resource_runtime
@@ -617,6 +621,12 @@ impl ResourceRequestClient {
                         &result,
                     );
                 owner_load.finish(result.clone());
+                if let Some(ref response) = success_response {
+                    request_client.speculatively_prefetch_script_dependencies(
+                        &callback_cache_request,
+                        response,
+                    );
+                }
             },
         ) {
             let result = Err(format!("{error:#}"));
@@ -653,7 +663,7 @@ impl ResourceRequestClient {
         collect_streaming_raw_response_as_text(response).await
     }
 
-    fn fetch_text_callback_with_cancel_after_policy<F>(
+    pub(super) fn fetch_text_callback_with_cancel_after_policy<F>(
         &self,
         request: Request,
         cancel_handle: FetchCancelHandle,

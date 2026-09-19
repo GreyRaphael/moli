@@ -15,6 +15,7 @@ pub(crate) mod loads;
 pub mod navigation;
 mod policy;
 mod request_client;
+mod speculative_prefetch;
 mod task_runner;
 
 pub use backend::{
