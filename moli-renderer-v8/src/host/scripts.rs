@@ -687,6 +687,12 @@ impl HostScriptScheduler {
         self.module_owner.native_compiled_module(entry_id)
     }
 
+    pub(crate) fn compiled_records(
+        &self,
+    ) -> impl Iterator<Item = &crate::module_runtime::ModuleRecordEntry> {
+        self.module_owner.compiled_records()
+    }
+
     pub(crate) fn mark_native_module_instantiated(&mut self, entry_id: ModuleEntryId) {
         self.module_owner.mark_native_module_instantiated(entry_id);
     }

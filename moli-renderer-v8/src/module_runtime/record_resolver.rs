@@ -93,4 +93,8 @@ impl NativeModuleRecordResolver {
     ) -> Option<&ModuleRecordEntry> {
         self.compiled_record_by_id(entry.usable_compiled_record_id()?)
     }
+
+    pub(crate) fn compiled_records(&self) -> impl Iterator<Item = &ModuleRecordEntry> {
+        self.compiled_records.iter().filter_map(|r| r.as_ref())
+    }
 }

@@ -592,6 +592,10 @@ impl ModuleOwnerState {
             .map(|record| record.compiled_module().clone())
     }
 
+    pub(crate) fn compiled_records(&self) -> impl Iterator<Item = &ModuleRecordEntry> {
+        self.document_modulator.compiled_records()
+    }
+
     pub(crate) fn mark_native_module_instantiated(&mut self, entry_id: ModuleEntryId) {
         self.document_modulator.mark_instantiated(entry_id);
     }

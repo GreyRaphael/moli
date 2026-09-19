@@ -294,6 +294,12 @@ impl DocumentRuntime {
             .native_compiled_module(entry_id)
     }
 
+    pub(crate) fn compiled_records(
+        &self,
+    ) -> impl Iterator<Item = &crate::module_runtime::ModuleRecordEntry> {
+        self.script_lifecycle.scripts().compiled_records()
+    }
+
     pub(crate) fn mark_native_module_instantiated(&mut self, entry_id: ModuleEntryId) {
         self.script_lifecycle
             .scripts_mut()

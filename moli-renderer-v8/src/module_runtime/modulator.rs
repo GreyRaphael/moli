@@ -783,6 +783,10 @@ impl NativeDocumentModulator {
     fn usable_record(&self, entry_id: ModuleEntryId) -> Option<&ModuleRecordEntry> {
         self.records.usable_record_for_entry(self.entry(entry_id))
     }
+
+    pub(crate) fn compiled_records(&self) -> impl Iterator<Item = &ModuleRecordEntry> {
+        self.records.compiled_records()
+    }
 }
 
 fn scheduled_dynamic_module_fetches_from_reserved_fetches(

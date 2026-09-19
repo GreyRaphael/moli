@@ -1,4 +1,5 @@
 use std::cell::OnceCell;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -20,6 +21,7 @@ pub(crate) struct ModuleRecordEntry {
     requests: Vec<ModuleRequestRecord>,
     wasm_module: Option<WasmModuleRecord>,
     state: ModuleRecordState,
+    code_cache_path: Option<PathBuf>,
 }
 
 impl ModuleRecordEntry {
@@ -34,6 +36,23 @@ impl ModuleRecordEntry {
             requests,
             wasm_module: None,
             state: ModuleRecordState::Compiled,
+            code_cache_path: None,
+        }
+    }
+
+    pub(crate) fn new_with_code_cache_path(
+        key: ModuleMapKey,
+        compiled_module: v8::Global<v8::Module>,
+        requests: Vec<ModuleRequestRecord>,
+        code_cache_path: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            key,
+            compiled_module,
+            requests,
+            wasm_module: None,
+            state: ModuleRecordState::Compiled,
+            code_cache_path,
         }
     }
 
@@ -49,6 +68,7 @@ impl ModuleRecordEntry {
             requests,
             wasm_module: Some(wasm_module),
             state: ModuleRecordState::Compiled,
+            code_cache_path: None,
         }
     }
 
@@ -70,6 +90,10 @@ impl ModuleRecordEntry {
 
     pub(crate) fn set_state(&mut self, state: ModuleRecordState) {
         self.state = state;
+    }
+
+    pub(crate) fn code_cache_path(&self) -> Option<&Path> {
+        self.code_cache_path.as_deref()
     }
 }
 

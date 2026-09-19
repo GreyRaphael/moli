@@ -3425,7 +3425,12 @@ impl ScriptVm {
                 let identity = module_identity_hash_from_v8_module(module);
                 let compiled_module = v8::Global::new(scope.as_ref(), module);
                 Ok((
-                    ModuleRecordEntry::new(key, compiled_module, requests),
+                    ModuleRecordEntry::new_with_code_cache_path(
+                        key,
+                        compiled_module,
+                        requests,
+                        code_cache_path,
+                    ),
                     identity,
                 ))
             })
@@ -3765,6 +3770,15 @@ impl ScriptVm {
             })?;
         self.document_runtime
             .mark_native_module_evaluating(root_entry);
+        let module_cache_candidates: Vec<_> = self
+            .document_runtime
+            .compiled_records()
+            .filter_map(|record| {
+                record
+                    .code_cache_path()
+                    .map(|path| (record.compiled_module().clone(), path.to_path_buf()))
+            })
+            .collect();
         let promise = self
             .renderer_document_isolate
             .with_entered_renderer_document_isolate(|isolate| {
@@ -3825,9 +3839,20 @@ impl ScriptVm {
                         "native module graph evaluation rejected",
                     )));
                 }
+                let save_evaluated_cache = |scope: &mut v8::PinScope<'_, '_>| {
+                    for (global_mod, path) in &module_cache_candidates {
+                        let local_mod = v8::Local::new(scope, global_mod);
+                        if local_mod.get_status() == v8::ModuleStatus::Evaluated {
+                            super::v8_code_cache::save_module_code_cache(scope, local_mod, path);
+                        }
+                    }
+                };
                 if let Some(promise) = promise {
                     match promise.state() {
-                        v8::PromiseState::Fulfilled => return Ok(Ok(None)),
+                        v8::PromiseState::Fulfilled => {
+                            save_evaluated_cache(&mut scope);
+                            return Ok(Ok(None));
+                        }
                         v8::PromiseState::Rejected => {
                             let result = promise.result(&scope);
                             return Ok(Err(native_module_evaluation_exception_error(
@@ -3842,6 +3867,7 @@ impl ScriptVm {
                         }
                     }
                 }
+                save_evaluated_cache(&mut scope);
                 Ok(Ok(None))
             })
             .map_err(|error| {

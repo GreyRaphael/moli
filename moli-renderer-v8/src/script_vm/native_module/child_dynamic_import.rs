@@ -1043,6 +1043,14 @@ impl ScriptVm {
                 )
             })?;
         document_modulator.mark_evaluating(root_entry);
+        let module_cache_candidates: Vec<_> = document_modulator
+            .compiled_records()
+            .filter_map(|record| {
+                record
+                    .code_cache_path()
+                    .map(|path| (record.compiled_module().clone(), path.to_path_buf()))
+            })
+            .collect();
         let promise = self
             .renderer_document_isolate
             .with_entered_renderer_document_isolate(|isolate| {
@@ -1073,12 +1081,25 @@ impl ScriptVm {
                         });
                     return Ok(Err(error));
                 };
+                let save_evaluated_cache = |scope: &mut v8::PinScope<'_, '_>| {
+                    for (global_mod, path) in &module_cache_candidates {
+                        let local_mod = v8::Local::new(scope, global_mod);
+                        if local_mod.get_status() == v8::ModuleStatus::Evaluated {
+                            crate::script_vm::v8_code_cache::save_module_code_cache(
+                                scope, local_mod, path,
+                            );
+                        }
+                    }
+                };
                 let promise = v8::Local::<v8::Promise>::try_from(value).ok();
                 if owner == NativeModuleEvaluationOwner::DynamicImport
                     && let Some(promise) = promise
                 {
                     match promise.state() {
-                        v8::PromiseState::Fulfilled => return Ok(Ok(None)),
+                        v8::PromiseState::Fulfilled => {
+                            save_evaluated_cache(&mut scope);
+                            return Ok(Ok(None));
+                        }
                         v8::PromiseState::Rejected | v8::PromiseState::Pending => {
                             let promise = v8::Global::new(scope.as_ref(), promise);
                             return Ok(Ok(Some(promise)));
@@ -1101,7 +1122,10 @@ impl ScriptVm {
                 }
                 if let Some(promise) = promise {
                     match promise.state() {
-                        v8::PromiseState::Fulfilled => return Ok(Ok(None)),
+                        v8::PromiseState::Fulfilled => {
+                            save_evaluated_cache(&mut scope);
+                            return Ok(Ok(None));
+                        }
                         v8::PromiseState::Rejected => {
                             let result = promise.result(&scope);
                             return Ok(Err(native_module_evaluation_exception_error(
@@ -1116,6 +1140,7 @@ impl ScriptVm {
                         }
                     }
                 }
+                save_evaluated_cache(&mut scope);
                 Ok(Ok(None))
             })
             .map_err(|error| {
