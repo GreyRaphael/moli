@@ -1442,6 +1442,7 @@ impl JsContextHost {
         &self,
         read_document: DomHandle,
     ) {
+        self.flush_pending_style_effects();
         let document_context = self.style_source_document_context_for_read_document(read_document);
         self.style_engine
             .drain_pending_style_invalidations_for_computed_style_read_with_document_context(
@@ -1455,6 +1456,7 @@ impl JsContextHost {
         &self,
         boundary: crate::style_engine::StyleInvalidationTurnExitBoundary,
     ) {
+        self.flush_pending_style_effects();
         let document_context = self.style_source_document_context();
         self.style_engine
             .drain_pending_style_invalidations_for_turn_exit_with_document_context(
@@ -2230,12 +2232,25 @@ impl JsContextHost {
         if style_mutation_effects_affect_layout_metric(effects) {
             self.clear_layout_rect_cache();
         }
+        self.pending_style_effects
+            .borrow_mut()
+            .extend(effects.iter().cloned());
+    }
+
+    pub(crate) fn flush_pending_style_effects(&self) {
+        let effects = {
+            let mut pending = self.pending_style_effects.borrow_mut();
+            if pending.is_empty() {
+                return;
+            }
+            std::mem::take(&mut *pending)
+        };
         let dom_host = self.dom_host() as *const _;
         let emulated_media = self.emulated_media().clone();
         let viewport = self.style_viewport();
         self.style_engine.invalidate_for_mutations_with_viewport(
             unsafe { &*dom_host },
-            effects,
+            &effects,
             &emulated_media,
             viewport,
         );

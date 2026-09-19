@@ -213,6 +213,7 @@ impl JsContextHost {
         request: LayoutPassRequest,
         consume: impl FnOnce(&mut LayoutPassResult<DomHandle>) -> Result<T, LayoutError>,
     ) -> Result<Option<T>, LayoutError> {
+        self.flush_pending_style_effects();
         let Some(root) = self
             .dom_host()
             .dom()

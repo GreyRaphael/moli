@@ -67,7 +67,7 @@ fn standalone_subtree_context_invalidation_preserves_unrelated_cache_entries() {
     assert!(host.append_child(document, outside));
     assert!(host.append_child(document, target));
 
-    let mut engine = MoliStyleEngine::new();
+    let engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
     let inputs = FullStyleWorldSnapshot::default();
     assert!(
@@ -137,7 +137,7 @@ fn pending_mutation_invalidations_drain_before_computed_style_read() {
     assert!(host.append_child(document, outside));
     assert!(host.append_child(document, target));
 
-    let mut engine = MoliStyleEngine::new();
+    let engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
     let inputs = FullStyleWorldSnapshot::default();
     assert!(
@@ -223,7 +223,7 @@ fn pending_mutation_invalidations_keep_separate_work_items_until_drain() {
     assert!(host.append_child(document, first_target));
     assert!(host.append_child(document, second_target));
 
-    let mut engine = MoliStyleEngine::new();
+    let engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
     let inputs = FullStyleWorldSnapshot::default();
     for handle in [outside, first_target, second_target] {

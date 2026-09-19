@@ -1230,7 +1230,7 @@ fn style_attribute_mutation_keeps_local_subtree_fallback_without_dependency() {
     let element = host.create_element("span");
     assert!(host.append_child(document, element));
 
-    let mut engine = MoliStyleEngine::new();
+    let engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
     let inputs = FullStyleWorldSnapshot::default();
     assert!(

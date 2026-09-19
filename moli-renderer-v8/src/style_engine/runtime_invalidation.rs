@@ -31,7 +31,7 @@ const IMMEDIATE_STRUCTURAL_MUTATION_EFFECT_LIMIT: usize = 256;
 impl MoliStyleEngine {
     #[cfg(test)]
     pub(crate) fn invalidate_for_mutations(
-        &mut self,
+        &self,
         host: &DomHost,
         effects: &[StyleMutationEffect],
         emulated_media: &EmulatedMediaOverrides,
@@ -45,7 +45,7 @@ impl MoliStyleEngine {
     }
 
     pub(crate) fn invalidate_for_mutations_with_viewport(
-        &mut self,
+        &self,
         host: &DomHost,
         effects: &[StyleMutationEffect],
         emulated_media: &EmulatedMediaOverrides,

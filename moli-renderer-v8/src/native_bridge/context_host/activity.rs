@@ -246,117 +246,12 @@ impl JsContextHost {
         trace.offset_parent_ns = trace.offset_parent_ns.saturating_add(elapsed.as_nanos());
     }
 
-    pub(crate) fn cached_mock_client_rect(
-        &self,
-        handle: DomHandle,
-        compute: impl FnOnce(&Self, DomHandle) -> crate::native_bridge::element::ClientRect,
-    ) -> crate::native_bridge::element::ClientRect {
-        let generation = self.layout_cache_generation_for_handle(handle);
-        if let Some((cached_generation, rect)) =
-            self.layout_rect_cache.borrow().get(&handle).copied()
-            && cached_generation == generation
-        {
-            return rect;
+    #[inline]
+    pub(crate) fn ensure_layout_rect_cache_fresh(&self) {
+        self.flush_pending_style_effects();
+        if !self.layout_rect_cache_dirty.replace(false) {
+            return;
         }
-        let rect = compute(self, handle);
-        self.layout_rect_cache
-            .borrow_mut()
-            .insert(handle, (generation, rect));
-        rect
-    }
-
-    pub(crate) fn cached_mock_flow_top(
-        &self,
-        handle: DomHandle,
-        compute: impl FnOnce(&Self, DomHandle) -> f64,
-    ) -> f64 {
-        let generation = self.layout_cache_generation_for_handle(handle);
-        if let Some((cached_generation, top)) =
-            self.layout_flow_top_cache.borrow().get(&handle).copied()
-            && cached_generation == generation
-        {
-            return top;
-        }
-        let top = compute(self, handle);
-        self.layout_flow_top_cache
-            .borrow_mut()
-            .insert(handle, (generation, top));
-        top
-    }
-
-    pub(crate) fn cached_mock_rendered_element(
-        &self,
-        handle: DomHandle,
-        compute: impl FnOnce(&Self, DomHandle) -> bool,
-    ) -> bool {
-        let generation = self.layout_cache_generation_for_handle(handle);
-        if let Some((cached_generation, rendered)) = self
-            .layout_mock_rendered_element_cache
-            .borrow()
-            .get(&handle)
-            .copied()
-            && cached_generation == generation
-        {
-            return rendered;
-        }
-        let rendered = compute(self, handle);
-        self.layout_mock_rendered_element_cache
-            .borrow_mut()
-            .insert(handle, (generation, rendered));
-        rendered
-    }
-
-    pub(crate) fn cached_preceding_mock_flow_count(&self, handle: DomHandle) -> Option<usize> {
-        let generation = self.layout_cache_generation_for_handle(handle);
-        self.layout_preceding_flow_count_cache
-            .borrow()
-            .get(&handle)
-            .filter(|(cached_generation, _)| *cached_generation == generation)
-            .map(|(_, count)| *count)
-    }
-
-    pub(crate) fn cache_preceding_mock_flow_counts(
-        &self,
-        counts: impl IntoIterator<Item = (DomHandle, usize)>,
-    ) {
-        let mut cache = self.layout_preceding_flow_count_cache.borrow_mut();
-        for (handle, count) in counts {
-            let generation = self.layout_cache_generation_for_handle(handle);
-            cache.insert(handle, (generation, count));
-        }
-    }
-
-    pub(crate) fn cached_mock_flow_prefix_cursor(
-        &self,
-        parent: DomHandle,
-    ) -> Option<(Option<DomHandle>, usize)> {
-        let generation = self.layout_cache_generation_for_handle(parent);
-        self.layout_flow_prefix_cursor_cache
-            .borrow()
-            .get(&parent)
-            .filter(|(cached_generation, _, _)| *cached_generation == generation)
-            .map(|(_, next_child, count)| (*next_child, *count))
-    }
-
-    pub(crate) fn cache_mock_flow_prefix_cursor(
-        &self,
-        parent: DomHandle,
-        next_child: Option<DomHandle>,
-        count: usize,
-    ) {
-        let generation = self.layout_cache_generation_for_handle(parent);
-        self.layout_flow_prefix_cursor_cache
-            .borrow_mut()
-            .insert(parent, (generation, next_child, count));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn note_mock_flow_subtree_node_visit_for_test(&self) {
-        self.layout_flow_subtree_node_visits
-            .set(self.layout_flow_subtree_node_visits.get().saturating_add(1));
-    }
-
-    pub(crate) fn clear_layout_rect_cache(&self) {
         let profile_enabled = moli_trace::cpu_profile_enabled();
         let total_started = profile_enabled.then(std::time::Instant::now);
         let (rect_len, rect_capacity, rect_us) = {
@@ -424,5 +319,127 @@ impl JsContextHost {
                 );
             }
         }
+    }
+
+    pub(crate) fn cached_mock_client_rect(
+        &self,
+        handle: DomHandle,
+        compute: impl FnOnce(&Self, DomHandle) -> crate::native_bridge::element::ClientRect,
+    ) -> crate::native_bridge::element::ClientRect {
+        self.ensure_layout_rect_cache_fresh();
+        let generation = self.layout_cache_generation_for_handle(handle);
+        if let Some((cached_generation, rect)) =
+            self.layout_rect_cache.borrow().get(&handle).copied()
+            && cached_generation == generation
+        {
+            return rect;
+        }
+        let rect = compute(self, handle);
+        self.layout_rect_cache
+            .borrow_mut()
+            .insert(handle, (generation, rect));
+        rect
+    }
+
+    pub(crate) fn cached_mock_flow_top(
+        &self,
+        handle: DomHandle,
+        compute: impl FnOnce(&Self, DomHandle) -> f64,
+    ) -> f64 {
+        self.ensure_layout_rect_cache_fresh();
+        let generation = self.layout_cache_generation_for_handle(handle);
+        if let Some((cached_generation, top)) =
+            self.layout_flow_top_cache.borrow().get(&handle).copied()
+            && cached_generation == generation
+        {
+            return top;
+        }
+        let top = compute(self, handle);
+        self.layout_flow_top_cache
+            .borrow_mut()
+            .insert(handle, (generation, top));
+        top
+    }
+
+    pub(crate) fn cached_mock_rendered_element(
+        &self,
+        handle: DomHandle,
+        compute: impl FnOnce(&Self, DomHandle) -> bool,
+    ) -> bool {
+        self.ensure_layout_rect_cache_fresh();
+        let generation = self.layout_cache_generation_for_handle(handle);
+        if let Some((cached_generation, rendered)) = self
+            .layout_mock_rendered_element_cache
+            .borrow()
+            .get(&handle)
+            .copied()
+            && cached_generation == generation
+        {
+            return rendered;
+        }
+        let rendered = compute(self, handle);
+        self.layout_mock_rendered_element_cache
+            .borrow_mut()
+            .insert(handle, (generation, rendered));
+        rendered
+    }
+
+    pub(crate) fn cached_preceding_mock_flow_count(&self, handle: DomHandle) -> Option<usize> {
+        self.ensure_layout_rect_cache_fresh();
+        let generation = self.layout_cache_generation_for_handle(handle);
+        self.layout_preceding_flow_count_cache
+            .borrow()
+            .get(&handle)
+            .filter(|(cached_generation, _)| *cached_generation == generation)
+            .map(|(_, count)| *count)
+    }
+
+    pub(crate) fn cache_preceding_mock_flow_counts(
+        &self,
+        counts: impl IntoIterator<Item = (DomHandle, usize)>,
+    ) {
+        self.ensure_layout_rect_cache_fresh();
+        let mut cache = self.layout_preceding_flow_count_cache.borrow_mut();
+        for (handle, count) in counts {
+            let generation = self.layout_cache_generation_for_handle(handle);
+            cache.insert(handle, (generation, count));
+        }
+    }
+
+    pub(crate) fn cached_mock_flow_prefix_cursor(
+        &self,
+        parent: DomHandle,
+    ) -> Option<(Option<DomHandle>, usize)> {
+        self.ensure_layout_rect_cache_fresh();
+        let generation = self.layout_cache_generation_for_handle(parent);
+        self.layout_flow_prefix_cursor_cache
+            .borrow()
+            .get(&parent)
+            .filter(|(cached_generation, _, _)| *cached_generation == generation)
+            .map(|(_, next_child, count)| (*next_child, *count))
+    }
+
+    pub(crate) fn cache_mock_flow_prefix_cursor(
+        &self,
+        parent: DomHandle,
+        next_child: Option<DomHandle>,
+        count: usize,
+    ) {
+        self.ensure_layout_rect_cache_fresh();
+        let generation = self.layout_cache_generation_for_handle(parent);
+        self.layout_flow_prefix_cursor_cache
+            .borrow_mut()
+            .insert(parent, (generation, next_child, count));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn note_mock_flow_subtree_node_visit_for_test(&self) {
+        self.layout_flow_subtree_node_visits
+            .set(self.layout_flow_subtree_node_visits.get().saturating_add(1));
+    }
+
+    #[inline]
+    pub(crate) fn clear_layout_rect_cache(&self) {
+        self.layout_rect_cache_dirty.set(true);
     }
 }

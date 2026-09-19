@@ -1080,6 +1080,8 @@ pub(crate) struct JsContextHost {
     layout_mock_rendered_element_cache: RefCell<HashMap<DomHandle, (u64, bool)>>,
     layout_preceding_flow_count_cache: RefCell<HashMap<DomHandle, (u64, usize)>>,
     layout_flow_prefix_cursor_cache: RefCell<HashMap<DomHandle, (u64, Option<DomHandle>, usize)>>,
+    layout_rect_cache_dirty: Cell<bool>,
+    pending_style_effects: RefCell<Vec<crate::style_engine::StyleMutationEffect>>,
     #[cfg(test)]
     layout_flow_subtree_node_visits: Cell<u64>,
     #[cfg(test)]

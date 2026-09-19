@@ -30,7 +30,12 @@ pub(crate) fn notify_dom_mutation(
 
     let profile = moli_trace::cpu_profile_enabled();
     let started = profile.then(Instant::now);
-    let style_effects = StyleMutationEffect::from_dom_mutation_effects(dom_host, effects);
+    let has_style_impact = dom_mutation_effects_have_connected_style_impact(dom_host, effects);
+    let style_effects = if has_style_impact {
+        StyleMutationEffect::from_dom_mutation_effects(dom_host, effects)
+    } else {
+        Vec::new()
+    };
     let style_effect_count = style_effects.len();
     let style_effects_us = started
         .map(|started| started.elapsed().as_micros())
@@ -54,4 +59,55 @@ pub(crate) fn notify_dom_mutation(
         style_invalidation_us,
         observer_us,
     }
+}
+
+#[inline]
+fn dom_mutation_effects_have_connected_style_impact(
+    dom_host: &DomHost,
+    effects: &DomMutationEffects,
+) -> bool {
+    if !effects.stylesheet_owners().changes().is_empty() {
+        return true;
+    }
+    if !effects.tree().disconnected_roots().is_empty() {
+        return true;
+    }
+    if !effects.slots().changed_slots().is_empty()
+        || !effects.slots().assignment_changes().is_empty()
+    {
+        return true;
+    }
+    if effects
+        .tree()
+        .connected_roots()
+        .iter()
+        .any(|&root| dom_host.is_connected(root))
+    {
+        return true;
+    }
+    if effects
+        .style()
+        .attribute_mutations()
+        .iter()
+        .any(|m| dom_host.is_connected(m.target()))
+    {
+        return true;
+    }
+    if effects
+        .style()
+        .child_list_mutations()
+        .iter()
+        .any(|m| dom_host.is_connected(m.target()))
+    {
+        return true;
+    }
+    if effects
+        .style()
+        .character_data_mutations()
+        .iter()
+        .any(|&node| dom_host.is_connected(node))
+    {
+        return true;
+    }
+    false
 }

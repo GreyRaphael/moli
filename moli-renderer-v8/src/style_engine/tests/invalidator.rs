@@ -11,7 +11,7 @@ fn no_source_no_cache_mutations_do_not_queue_retained_invalidation_work() {
     assert!(host.append_child(parent, child));
     assert!(host.append_child(document, target));
 
-    let mut engine = MoliStyleEngine::new();
+    let engine = MoliStyleEngine::new();
     let media = crate::protocol_types::EmulatedMediaOverrides::default();
     let epoch = engine.target_context_epoch_for_document_for_test(document);
 
@@ -4356,7 +4356,7 @@ fn retained_stylo_invalidator_uses_user_agent_attribute_dependencies() {
     assert!(host.append_child(document, dialog));
     assert!(host.append_child(document, unrelated));
 
-    let mut engine = MoliStyleEngine::new();
+    let engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
     let inputs = FullStyleWorldSnapshot::default();
     for handle in [dialog, unrelated] {

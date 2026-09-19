@@ -461,6 +461,8 @@ impl JsContextHost {
             layout_mock_rendered_element_cache: RefCell::default(),
             layout_preceding_flow_count_cache: RefCell::default(),
             layout_flow_prefix_cursor_cache: RefCell::default(),
+            layout_rect_cache_dirty: std::cell::Cell::new(false),
+            pending_style_effects: RefCell::default(),
             #[cfg(test)]
             layout_flow_subtree_node_visits: Cell::new(0),
             #[cfg(test)]
