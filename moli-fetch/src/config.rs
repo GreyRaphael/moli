@@ -41,10 +41,10 @@ pub struct FetchConfig {
 
 impl FetchConfig {
     pub const DEFAULT_USER_AGENT: &str = moli_browser_profile::DEFAULT_USER_AGENT;
-    /// Chromium's normal socket pool uses six connections per host/group for
-    /// HTTP/1-style connection pooling. This is a transport connection cap, not
-    /// a runtime active-transfer cap and not an HTTP/2 stream cap.
-    pub const DEFAULT_HTTP_MAX_HOST_CONNECTIONS: u8 = 6;
+    /// Modern web apps often issue bursts of parallel API and subresource requests.
+    /// Increasing this cap from legacy 6 to 32 avoids artificial queueing while
+    /// preserving connection limits.
+    pub const DEFAULT_HTTP_MAX_HOST_CONNECTIONS: u8 = 32;
 
     pub fn user_agent(&self) -> &str {
         self.browser_identity.user_agent()

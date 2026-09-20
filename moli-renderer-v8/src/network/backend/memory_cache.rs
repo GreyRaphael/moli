@@ -589,6 +589,12 @@ impl SharedMemoryResourceCache {
     }
 
     #[cfg(test)]
+    pub(crate) fn contains_script_text(&self, key: &ScriptTextCacheKey) -> bool {
+        self.entries
+            .contains_key(&MemoryCacheKey::ScriptText(key.clone()))
+    }
+
+    #[cfg(test)]
     fn contains_raw_subresource(&self, key: &RawSubresourceCacheKey) -> bool {
         self.entries
             .contains_key(&MemoryCacheKey::RawSubresource(key.clone()))
