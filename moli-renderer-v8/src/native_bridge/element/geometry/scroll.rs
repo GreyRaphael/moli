@@ -49,11 +49,18 @@ pub(super) fn set_node_scroll_position(
     if changed {
         let runtime = unsafe { &*runtime_ptr };
         let doc = document.unwrap_or_else(|| runtime.document_handle());
-        runtime.update_latest_layout_container_scroll(
-            doc,
-            handle,
-            moli_layout::LayoutPoint::new(left as f32, top as f32),
-        );
+        let is_document_scroller = runtime
+            .dom_host()
+            .dom()
+            .document_element_handle_for_document(doc)
+            == Some(handle);
+        if !is_document_scroller {
+            runtime.update_latest_layout_container_scroll(
+                doc,
+                handle,
+                moli_layout::LayoutPoint::new(left as f32, top as f32),
+            );
+        }
         if queue_observable_effects {
             queue_scroll_observable_effects(scope, runtime_ptr, document, false);
         }
