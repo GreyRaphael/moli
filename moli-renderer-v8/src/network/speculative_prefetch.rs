@@ -10,14 +10,11 @@
 //! (`PendingWaiter` / `Owner`), in-flight prefetches automatically join any incoming
 //! dynamic import requests without duplicate network roundtrips.
 
-use moli_fetch::{BrowserRequestMetadata, FetchCancelHandle, Request, Response};
+use moli_fetch::{BrowserRequestMetadata, Request, Response};
 use std::collections::HashSet;
 use url::Url;
 
-use super::{
-    ResourceRequestClient,
-    backend::{ScriptTextCacheLookup, script_text_cache_key},
-};
+use super::{ResourceRequestClient, backend::script_text_cache_key};
 
 /// Maximum number of speculative prefetches launched from a single script.
 const MAX_PREFETCHES_PER_SCRIPT: usize = 20;
@@ -140,7 +137,14 @@ impl ResourceRequestClient {
         if response.status < 200 || response.status > 299 {
             return;
         }
+        self.speculatively_prefetch_script_source_text(parent_request, response.body_text());
+    }
 
+    pub(crate) fn speculatively_prefetch_script_source_text(
+        &self,
+        parent_request: &Request,
+        source_text: &str,
+    ) {
         // Only scan JavaScript or module resources
         if let Some(ref metadata) = parent_request.browser_request_metadata {
             if *metadata != BrowserRequestMetadata::Script {
@@ -148,12 +152,11 @@ impl ResourceRequestClient {
             }
         }
 
-        let body_text = response.body_text();
-        if body_text.len() < 10 {
+        if source_text.len() < 10 {
             return;
         }
 
-        let specifiers = extract_speculative_script_specifiers(body_text);
+        let specifiers = extract_speculative_script_specifiers(source_text);
         if specifiers.is_empty() {
             return;
         }
@@ -187,95 +190,30 @@ impl ResourceRequestClient {
         let key =
             script_text_cache_key(&prefetch_req).for_page_cache_partition(page_cache_partition_id);
 
-        let load = {
+        let reserved = if prefetch_req.cache_mode().allows_memory_cache_lookup() {
             let mut cache = self.resource_runtime.memory_cache().lock();
-            if prefetch_req.cache_mode().allows_memory_cache_lookup() {
-                match cache.lookup_script_text(key.clone()) {
-                    ScriptTextCacheLookup::CompletedHit(_)
-                    | ScriptTextCacheLookup::PendingWaiter(_) => {
-                        // Already in cache or currently in-flight
-                        return;
-                    }
-                    ScriptTextCacheLookup::Owner(load) => load,
-                }
-            } else {
-                match cache.replace_script_text(key.clone()) {
-                    ScriptTextCacheLookup::CompletedHit(_)
-                    | ScriptTextCacheLookup::PendingWaiter(_) => {
-                        return;
-                    }
-                    ScriptTextCacheLookup::Owner(load) => load,
-                }
-            }
+            cache.try_reserve_speculative_prefetch(&key)
+        } else {
+            true
         };
 
-        let timing_url = moli_trace::cdp_nav_timing_enabled().then(|| url.to_string());
-        let started = timing_url.is_some().then(std::time::Instant::now);
-        if let Some(ref url_str) = timing_url {
-            tracing::info!(
-                target: "moli_cdp_nav_timing",
-                url = %url_str,
-                cacheable = true,
-                cache_role = "speculative-owner",
-                stage = "speculative_module_prefetch_start",
-            );
+        if !reserved {
+            return;
         }
 
-        let cancel_handle = FetchCancelHandle::new();
-        load.attach_transport_cancel(cancel_handle.clone());
-        let request_client = self.clone();
-        let callback_key = key.clone();
-        let callback_cache_request = prefetch_req.clone();
-        let owner_load = load.clone();
-
-        let started_fetch = self.fetch_text_callback_with_cancel_after_policy(
-            prefetch_req.clone(),
-            cancel_handle,
-            move |result| {
-                let result = result.map_err(|error| format!("{error:#}"));
-                request_client
+        let client = self.clone();
+        let finish_key = key.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = client
+                    .fetch_cacheable_script_text_stream(prefetch_req)
+                    .await;
+                client
                     .resource_runtime
                     .memory_cache()
                     .lock()
-                    .complete_script_text(
-                        &callback_key,
-                        &owner_load,
-                        &callback_cache_request,
-                        &result,
-                    );
-                owner_load.finish(result.clone());
-
-                if let (Some(started), Some(url_str)) = (started, timing_url.as_deref()) {
-                    let status = result.as_ref().ok().map(|resp| resp.status);
-                    tracing::info!(
-                        target: "moli_cdp_nav_timing",
-                        url = %url_str,
-                        cacheable = true,
-                        cache_role = "speculative-owner",
-                        status,
-                        ok = result.is_ok(),
-                        elapsed_ms = started.elapsed().as_millis(),
-                        stage = "speculative_module_prefetch_done",
-                    );
-                }
-
-                // Recursively prefetch second-level dependencies if any
-                if let Ok(ref response) = result {
-                    request_client.speculatively_prefetch_script_dependencies(
-                        &callback_cache_request,
-                        response,
-                    );
-                }
-            },
-        );
-
-        if let Err(error) = started_fetch {
-            let result = Err(format!("{error:#}"));
-            self.resource_runtime
-                .memory_cache()
-                .lock()
-                .complete_script_text(&key, &load, &prefetch_req, &result);
-            load.finish(result);
+                    .finish_speculative_prefetch(&finish_key);
+            });
         }
     }
 }
@@ -320,5 +258,23 @@ mod tests {
         "#;
         let specs = extract_speculative_script_specifiers(source);
         assert_eq!(specs, vec!["./shared.js", "./other.js"]);
+    }
+
+    #[test]
+    fn speculative_prefetch_source_text_skips_non_script() {
+        let owner = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).unwrap();
+        let mut req = Request::new("GET", "https://example.test/image.png", None, vec![]).unwrap();
+        req.browser_request_metadata = Some(moli_fetch::BrowserRequestMetadata::Image);
+        owner.speculatively_prefetch_script_source_text(&req, "import('./chunk.js')");
+    }
+
+    #[test]
+    fn speculative_prefetch_source_text_handles_prefix_chunks() {
+        let owner = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).unwrap();
+        let mut req =
+            Request::new("GET", "https://example.test/assets/app.js", None, vec![]).unwrap();
+        req.browser_request_metadata = Some(moli_fetch::BrowserRequestMetadata::Script);
+        let chunk0 = r#"const __vite__mapDeps=(i,d=["./home-chunk.js"])=>d[i];"#;
+        owner.speculatively_prefetch_script_source_text(&req, chunk0);
     }
 }

@@ -6,6 +6,7 @@
 //! the owning Page cache partition, so a DevTools cache bypass can replace one
 //! Page's retained resource without rewriting a live peer Page's resource.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Weak};
 
 use indexmap::IndexMap;
@@ -141,6 +142,7 @@ pub(in crate::network) struct SharedMemoryResourceCache {
     retained_bytes: usize,
     retained_bytes_limit: usize,
     resource_body_bytes_limit: usize,
+    in_flight_prefetches: HashSet<ScriptTextCacheKey>,
 }
 
 pub(in crate::network) enum ScriptTextCacheLookup {
@@ -311,7 +313,29 @@ impl SharedMemoryResourceCache {
             retained_bytes: 0,
             retained_bytes_limit,
             resource_body_bytes_limit,
+            in_flight_prefetches: HashSet::new(),
         }
+    }
+
+    pub(in crate::network) fn try_reserve_speculative_prefetch(
+        &mut self,
+        key: &ScriptTextCacheKey,
+    ) -> bool {
+        let cache_key = MemoryCacheKey::ScriptText(key.clone());
+        if let Some(entry) = self.entries.get(&cache_key) {
+            if !entry.is_expired(unix_now_ms()) {
+                return false;
+            }
+        }
+        if self.in_flight_prefetches.contains(key) {
+            return false;
+        }
+        self.in_flight_prefetches.insert(key.clone());
+        true
+    }
+
+    pub(in crate::network) fn finish_speculative_prefetch(&mut self, key: &ScriptTextCacheKey) {
+        self.in_flight_prefetches.remove(key);
     }
 
     pub(in crate::network) fn lookup_script_text(
@@ -562,12 +586,6 @@ impl SharedMemoryResourceCache {
             retained_bytes_limit: self.retained_bytes_limit,
             resource_body_bytes_limit: self.resource_body_bytes_limit,
         }
-    }
-
-    #[cfg(test)]
-    fn contains_script_text(&self, key: &ScriptTextCacheKey) -> bool {
-        self.entries
-            .contains_key(&MemoryCacheKey::ScriptText(key.clone()))
     }
 
     #[cfg(test)]

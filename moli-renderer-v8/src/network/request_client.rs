@@ -305,7 +305,10 @@ impl ResourceRequestClient {
                 );
             }
             let result = self
-                .fetch_text_stream_with_cancel_after_policy(request, FetchCancelHandle::new())
+                .fetch_script_text_stream_with_speculative_preparse(
+                    request,
+                    FetchCancelHandle::new(),
+                )
                 .await;
             if let (Some(started), Some(url)) = (started, timing_url.as_deref()) {
                 let status = result.as_ref().ok().map(|response| response.status);
@@ -406,7 +409,7 @@ impl ResourceRequestClient {
         }
         let cache_request = request.clone();
         let result = self
-            .fetch_text_stream_with_cancel_after_policy(request, FetchCancelHandle::new())
+            .fetch_script_text_stream_with_speculative_preparse(request, FetchCancelHandle::new())
             .await
             .map_err(|error| format!("{error:#}"));
         if let (Some(started), Some(url)) = (started, timing_url.as_deref()) {
@@ -667,6 +670,61 @@ impl ResourceRequestClient {
             .fetch_raw_stream_with_cancel_after_policy(request, cancel_handle)
             .await?;
         collect_streaming_raw_response_as_text(response).await
+    }
+
+    async fn fetch_script_text_stream_with_speculative_preparse(
+        &self,
+        request: Request,
+        cancel_handle: FetchCancelHandle,
+    ) -> Result<Response> {
+        if request.auth_requires_buffered_transport() || !request.follow_redirects {
+            return self
+                .resource_runtime
+                .client()
+                .fetch_with_cancel(request, cancel_handle)
+                .await;
+        }
+
+        let response = self
+            .fetch_raw_stream_with_cancel_after_policy(request.clone(), cancel_handle)
+            .await?;
+        self.collect_streaming_script_response_as_text(request, response)
+            .await
+    }
+
+    async fn collect_streaming_script_response_as_text(
+        &self,
+        parent_request: Request,
+        mut response: StreamingRawResponse,
+    ) -> Result<Response> {
+        if response.status < 200 || response.status > 299 {
+            return response.into_lossy_materialized_text_response().await;
+        }
+
+        let network_request_extra_info = response.network_request_extra_info().cloned();
+        let head = response.head();
+        let mut body_bytes = Vec::new();
+        let mut scanned_first_chunk = false;
+        let mut scanned_prefix_64k = false;
+
+        while let Some(chunk) = response.next_chunk().await {
+            body_bytes.extend_from_slice(&chunk);
+            if !scanned_first_chunk && !body_bytes.is_empty() {
+                scanned_first_chunk = true;
+                let scan_len = body_bytes.len().min(64 * 1024);
+                let prefix_text = String::from_utf8_lossy(&body_bytes[..scan_len]);
+                self.speculatively_prefetch_script_source_text(&parent_request, &prefix_text);
+            } else if !scanned_prefix_64k && body_bytes.len() >= 64 * 1024 {
+                scanned_prefix_64k = true;
+                let prefix_text = String::from_utf8_lossy(&body_bytes[..64 * 1024]);
+                self.speculatively_prefetch_script_source_text(&parent_request, &prefix_text);
+            }
+        }
+        response.finish().await?;
+
+        let response = Response::from_head_and_lossy_body_bytes(head, body_bytes)
+            .with_network_request_extra_info(network_request_extra_info);
+        Ok(response)
     }
 
     pub(super) fn fetch_text_callback_with_cancel_after_policy<F>(
