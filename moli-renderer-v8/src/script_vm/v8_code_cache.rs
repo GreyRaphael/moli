@@ -65,18 +65,18 @@ fn in_memory_cache() -> &'static RwLock<MemoryCodeCache> {
 /// Default directory for persistent V8 bytecode code cache.
 #[allow(dead_code)]
 pub fn default_v8_code_cache_dir() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("moli").join("v8-code-cache");
-        }
+    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
+        && !xdg.is_empty()
+    {
+        return PathBuf::from(xdg).join("moli").join("v8-code-cache");
     }
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            return PathBuf::from(home)
-                .join(".cache")
-                .join("moli")
-                .join("v8-code-cache");
-        }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        return PathBuf::from(home)
+            .join(".cache")
+            .join("moli")
+            .join("v8-code-cache");
     }
     std::env::temp_dir().join("moli").join("v8-code-cache")
 }
@@ -135,7 +135,7 @@ pub fn save_script_code_cache(
 ) {
     let unbound = script.get_unbound_script(scope);
     if let Some(code_cache) = unbound.create_code_cache() {
-        let data: Arc<[u8]> = Arc::from((&**code_cache).to_vec().into_boxed_slice());
+        let data: Arc<[u8]> = Arc::from(&code_cache[..]);
         in_memory_cache()
             .write()
             .insert(path.to_path_buf(), data.clone());
@@ -154,7 +154,7 @@ pub fn save_module_code_cache(
 ) {
     let unbound = module.get_unbound_module_script(scope);
     if let Some(code_cache) = unbound.create_code_cache() {
-        let data: Arc<[u8]> = Arc::from((&**code_cache).to_vec().into_boxed_slice());
+        let data: Arc<[u8]> = Arc::from(&code_cache[..]);
         in_memory_cache()
             .write()
             .insert(path.to_path_buf(), data.clone());

@@ -51,15 +51,18 @@ pub fn extract_speculative_script_specifiers(source: &str) -> Vec<String> {
                 while k < n && bytes[k] != quote && bytes[k] != b'\n' && bytes[k] != b'\r' {
                     k += 1;
                 }
-                if k < n && bytes[k] == quote && k > start && k - start < 300 {
-                    if let Ok(spec) = std::str::from_utf8(&bytes[start..k]) {
-                        let spec = spec.trim();
-                        if !spec.is_empty()
-                            && is_valid_specifier_path(spec)
-                            && seen.insert(spec.to_owned())
-                        {
-                            results.push(spec.to_owned());
-                        }
+                if k < n
+                    && bytes[k] == quote
+                    && k > start
+                    && k - start < 300
+                    && let Ok(spec) = std::str::from_utf8(&bytes[start..k])
+                {
+                    let spec = spec.trim();
+                    if !spec.is_empty()
+                        && is_valid_specifier_path(spec)
+                        && seen.insert(spec.to_owned())
+                    {
+                        results.push(spec.to_owned());
                     }
                 }
                 i = k + 1;
@@ -86,15 +89,16 @@ pub fn extract_speculative_script_specifiers(source: &str) -> Vec<String> {
                 {
                     k += 1;
                 }
-                if k < n && bytes[k] == quote && k > start && k - start < 300 {
-                    if let Ok(spec) = std::str::from_utf8(&bytes[start..k]) {
-                        if (spec.ends_with(".js") || spec.ends_with(".mjs"))
-                            && is_valid_specifier_path(spec)
-                            && seen.insert(spec.to_owned())
-                        {
-                            results.push(spec.to_owned());
-                        }
-                    }
+                if k < n
+                    && bytes[k] == quote
+                    && k > start
+                    && k - start < 300
+                    && let Ok(spec) = std::str::from_utf8(&bytes[start..k])
+                    && (spec.ends_with(".js") || spec.ends_with(".mjs"))
+                    && is_valid_specifier_path(spec)
+                    && seen.insert(spec.to_owned())
+                {
+                    results.push(spec.to_owned());
                 }
                 i = k + 1;
                 continue;
@@ -146,10 +150,10 @@ impl ResourceRequestClient {
         source_text: &str,
     ) {
         // Only scan JavaScript or module resources
-        if let Some(ref metadata) = parent_request.browser_request_metadata {
-            if *metadata != BrowserRequestMetadata::Script {
-                return;
-            }
+        if let Some(ref metadata) = parent_request.browser_request_metadata
+            && *metadata != BrowserRequestMetadata::Script
+        {
+            return;
         }
 
         if source_text.len() < 10 {

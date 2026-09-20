@@ -424,23 +424,18 @@ async fn run_cors_preflight_if_needed(
             return Ok(());
         }
 
-        loop {
-            match cors_cache.register_or_wait(&origin_str, &request.url, request.credentials_mode) {
-                crate::network_host::cors_cache::InFlightAction::Wait(mut rx) => {
-                    let _ = rx.wait_for(|&done| done).await;
-                    if cors_cache.check(
-                        &origin_str,
-                        &request.url,
-                        request.credentials_mode,
-                        &request.method,
-                        preflight_request_headers,
-                    ) {
-                        return Ok(());
-                    }
-                }
-                crate::network_host::cors_cache::InFlightAction::Execute => {
-                    break;
-                }
+        while let crate::network_host::cors_cache::InFlightAction::Wait(mut rx) =
+            cors_cache.register_or_wait(&origin_str, &request.url, request.credentials_mode)
+        {
+            let _ = rx.wait_for(|&done| done).await;
+            if cors_cache.check(
+                &origin_str,
+                &request.url,
+                request.credentials_mode,
+                &request.method,
+                preflight_request_headers,
+            ) {
+                return Ok(());
             }
         }
 

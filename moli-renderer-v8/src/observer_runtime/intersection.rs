@@ -155,21 +155,19 @@ pub(super) fn compute_intersection_check_batch(
             // When the DOM has grown via streaming item appends, the sentinel or appended items
             // are beyond or displaced from the frozen layout snapshot. Extrapolate their true
             // viewport rectangle so that intersection thresholds cross accurately without layout freezes.
-            if !runtime.is_latest_layout_dom_fresh() {
-                if let Some((target_rect, _)) =
+            if !runtime.is_latest_layout_dom_fresh()
+                && let Some((target_rect, _)) =
                     crate::native_bridge::element::try_append_only_target_geometry(
                         runtime,
                         document,
                         work[index].target,
                     )
-                {
-                    if let Some(geom) = work[index].geometry.as_mut() {
-                        geom.target_rects =
-                            vec![moli_layout::LayoutTransform2D::IDENTITY.map_rect(target_rect)];
-                        geom.target_has_layout = true;
-                        geom.target_visible = true;
-                    }
-                }
+                && let Some(geom) = work[index].geometry.as_mut()
+            {
+                geom.target_rects =
+                    vec![moli_layout::LayoutTransform2D::IDENTITY.map_rect(target_rect)];
+                geom.target_has_layout = true;
+                geom.target_visible = true;
             }
         }
     }

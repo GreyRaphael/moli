@@ -322,10 +322,10 @@ impl SharedMemoryResourceCache {
         key: &ScriptTextCacheKey,
     ) -> bool {
         let cache_key = MemoryCacheKey::ScriptText(key.clone());
-        if let Some(entry) = self.entries.get(&cache_key) {
-            if !entry.is_expired(unix_now_ms()) {
-                return false;
-            }
+        if let Some(entry) = self.entries.get(&cache_key)
+            && !entry.is_expired(unix_now_ms())
+        {
+            return false;
         }
         if self.in_flight_prefetches.contains(key) {
             return false;
