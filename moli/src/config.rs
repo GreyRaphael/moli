@@ -365,40 +365,40 @@ pub fn response_wait_criteria_from_args(
 pub(crate) fn default_http_cache_dir() -> PathBuf {
     #[cfg(target_os = "linux")]
     {
-        if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
-            if !xdg.is_empty() {
-                return PathBuf::from(xdg).join("moli").join("http-cache");
-            }
+        if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
+            && !xdg.is_empty()
+        {
+            return PathBuf::from(xdg).join("moli").join("http-cache");
         }
-        if let Ok(home) = std::env::var("HOME") {
-            if !home.is_empty() {
-                return PathBuf::from(home)
-                    .join(".cache")
-                    .join("moli")
-                    .join("http-cache");
-            }
+        if let Ok(home) = std::env::var("HOME")
+            && !home.is_empty()
+        {
+            return PathBuf::from(home)
+                .join(".cache")
+                .join("moli")
+                .join("http-cache");
         }
     }
     #[cfg(target_os = "macos")]
     {
-        if let Ok(home) = std::env::var("HOME") {
-            if !home.is_empty() {
-                return PathBuf::from(home)
-                    .join("Library")
-                    .join("Caches")
-                    .join("moli")
-                    .join("http-cache");
-            }
+        if let Ok(home) = std::env::var("HOME")
+            && !home.is_empty()
+        {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Caches")
+                .join("moli")
+                .join("http-cache");
         }
     }
     #[cfg(windows)]
     {
-        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-            if !local_app_data.is_empty() {
-                return PathBuf::from(local_app_data)
-                    .join("moli")
-                    .join("http-cache");
-            }
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA")
+            && !local_app_data.is_empty()
+        {
+            return PathBuf::from(local_app_data)
+                .join("moli")
+                .join("http-cache");
         }
     }
     std::env::temp_dir().join("moli").join("http-cache")
