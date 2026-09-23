@@ -151,23 +151,101 @@ pub(super) fn compute_intersection_check_batch(
             };
             work[index].geometry = geometry;
 
-            // Append-Only Subtree Layout (手段 1 for IntersectionObserver):
+            // Tier 0 Conservative Bounding Envelope (方案三):
             // When the DOM has grown via streaming item appends, the sentinel or appended items
             // are beyond or displaced from the frozen layout snapshot. Extrapolate their true
             // viewport rectangle so that intersection thresholds cross accurately without layout freezes.
             if !runtime.is_latest_layout_dom_fresh()
-                && let Some((target_rect, _)) =
+                && let Some((target_rect, parent_containers)) =
                     crate::native_bridge::element::try_append_only_target_geometry(
                         runtime,
                         document,
                         work[index].target,
                     )
-                && let Some(geom) = work[index].geometry.as_mut()
             {
-                geom.target_rects =
-                    vec![moli_layout::LayoutTransform2D::IDENTITY.map_rect(target_rect)];
-                geom.target_has_layout = true;
-                geom.target_visible = true;
+                let target_node = work[index].target;
+                let root_opt = work[index].options.root;
+                if let Some(geom) = work[index].geometry.as_mut() {
+                    geom.target_rects =
+                        vec![moli_layout::LayoutTransform2D::IDENTITY.map_rect(target_rect)];
+                    geom.target_has_layout = true;
+                    geom.target_visible = true;
+                    if let Some(root_node) = root_opt {
+                        geom.root_is_layout_ancestor =
+                            super::is_ancestor_or_self(dom_host, root_node, target_node);
+                    } else {
+                        geom.root_is_layout_ancestor = true;
+                    }
+                    if geom.ancestor_clips.is_empty() {
+                        for container in &parent_containers {
+                            if root_opt == Some(container.source) {
+                                break;
+                            }
+                            geom.ancestor_clips.push(container.metrics.scrollport);
+                        }
+                    }
+                } else {
+                    let (root_rect, root_is_layout_ancestor, root_clips_overflow) =
+                        if let Some(root_node) = root_opt {
+                            let (root_quads, clips_overflow) = runtime
+                                .with_latest_layout_tree_for_document(document, |tree| {
+                                    let quads = tree.client_rects_for_source(root_node);
+                                    let clips = tree
+                                        .source_output(root_node)
+                                        .and_then(|output| output.principal_box)
+                                        .and_then(|root_box| tree.scroll_extent(root_box))
+                                        .is_some_and(|extent| extent.clips_overflow);
+                                    (quads, clips)
+                                })
+                                .unwrap_or_default();
+                            let is_ancestor =
+                                super::is_ancestor_or_self(dom_host, root_node, target_node);
+                            if let Some(quad) = root_quads.first() {
+                                (*quad, is_ancestor, clips_overflow)
+                            } else {
+                                (
+                                    moli_layout::LayoutTransform2D::IDENTITY
+                                        .map_rect(moli_layout::LayoutRect::ZERO),
+                                    is_ancestor,
+                                    clips_overflow,
+                                )
+                            }
+                        } else {
+                            let viewport = runtime.layout_viewport_for_document(document);
+                            (
+                                moli_layout::LayoutTransform2D::IDENTITY.map_rect(
+                                    moli_layout::LayoutRect::new(
+                                        0.0,
+                                        0.0,
+                                        viewport.css_width as f32,
+                                        viewport.css_height as f32,
+                                    ),
+                                ),
+                                true,
+                                false,
+                            )
+                        };
+
+                    let mut ancestor_clips = Vec::new();
+                    for container in &parent_containers {
+                        if root_opt == Some(container.source) {
+                            break;
+                        }
+                        ancestor_clips.push(container.metrics.scrollport);
+                    }
+
+                    work[index].geometry = Some(moli_layout::LayoutIntersectionGeometry {
+                        target_rects: vec![
+                            moli_layout::LayoutTransform2D::IDENTITY.map_rect(target_rect),
+                        ],
+                        root_rect,
+                        ancestor_clips,
+                        target_has_layout: true,
+                        target_visible: true,
+                        root_clips_overflow,
+                        root_is_layout_ancestor,
+                    });
+                }
             }
         }
     }

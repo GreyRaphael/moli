@@ -2007,7 +2007,11 @@ fn clip_bounds_by_scroll_ancestors(
     clip_rect
 }
 
-fn is_ancestor_or_self(dom_host: &DomHost, ancestor: NativeNodeId, node: NativeNodeId) -> bool {
+pub(super) fn is_ancestor_or_self(
+    dom_host: &DomHost,
+    ancestor: NativeNodeId,
+    node: NativeNodeId,
+) -> bool {
     let mut current = Some(node);
     while let Some(handle) = current {
         if handle == ancestor {
