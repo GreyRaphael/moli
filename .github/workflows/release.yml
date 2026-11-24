@@ -110,6 +110,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install packaging dependencies
@@ -157,18 +158,24 @@ jobs:
             artifact: release-macos-aarch64
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
+      RUSTUP_TOOLCHAIN: "1.96.1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install pinned Rust toolchain
         shell: bash
         run: |
           set -euo pipefail
-          toolchain=$(tr -d '[:space:]' < rust-toolchain)
+          toolchain="${RUSTUP_TOOLCHAIN:-1.96.1}"
+          if [[ -f rust-toolchain ]]; then
+            toolchain=$(tr -d '[:space:]' < rust-toolchain)
+          fi
           rustup toolchain install "$toolchain" --profile minimal --no-self-update
+          rustup default "$toolchain"
           rustc --version
 
       - name: Build and package
@@ -204,10 +211,13 @@ jobs:
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
             artifact: release-windows-aarch64
+    env:
+      RUSTUP_TOOLCHAIN: "1.96.1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install pinned Rust toolchain
@@ -215,8 +225,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
-          $toolchain = (Get-Content rust-toolchain -Raw).Trim()
+          $toolchain = if (Test-Path rust-toolchain) { (Get-Content rust-toolchain -Raw).Trim() } else { "1.96.1" }
           rustup toolchain install $toolchain --profile minimal --no-self-update
+          rustup default $toolchain
           rustc --version
 
       - name: Validate PowerShell installer
@@ -265,6 +276,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Download packaged artifacts
@@ -323,8 +335,21 @@ jobs:
             "${assets[@]}"
             --repo "$GITHUB_REPOSITORY"
             --title "Moli $RELEASE_TAG"
-            --generate-notes
           )
+          tag_notes=$(git for-each-ref --format='%(contents)' "refs/tags/$RELEASE_TAG" | sed -e '/./,$!d')
+          if [[ -n "$tag_notes" ]]; then
+            notes_file=$(mktemp)
+            trap 'rm -f "$notes_file"' EXIT
+            printf '%s\n' "$tag_notes" > "$notes_file"
+            prev_tag=$(git tag --sort=-creatordate --list 'v*' | grep -vxF "$RELEASE_TAG" | head -n 1 || true)
+            if [[ -n "$prev_tag" ]]; then
+              printf '\n**完整变更记录**: https://github.com/%s/compare/%s...%s\n' \
+                "$GITHUB_REPOSITORY" "$prev_tag" "$RELEASE_TAG" >> "$notes_file"
+            fi
+            args+=(--notes-file "$notes_file")
+          else
+            args+=(--generate-notes)
+          fi
           if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
             args+=(--target "$GITHUB_SHA")
           fi
