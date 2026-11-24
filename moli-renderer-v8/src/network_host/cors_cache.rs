@@ -144,17 +144,6 @@ impl CorsPreflightCache {
         }
     }
 
-    #[cfg(test)]
-    pub fn finish_in_flight(
-        &self,
-        origin: &str,
-        url: &Url,
-        credentials_mode: RequestCredentialsMode,
-    ) {
-        let key = PreflightCacheKey::new(origin, url, credentials_mode);
-        self.finish_in_flight_key(&key);
-    }
-
     pub fn record(
         &self,
         origin: &str,
