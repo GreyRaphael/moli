@@ -1,15 +1,13 @@
 name: CI
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
   push:
-    branches:
-      - main
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       base_ref:
-        description: Base commit or ref (defaults to the previous commit)
+        description: Base commit or ref (defaults to the previous v* tag or parent commit)
         required: false
         default: ""
       head_ref:
@@ -18,13 +16,18 @@ on:
         default: ""
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: >-
+    ci-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 env:
+  RUST_TOOLCHAIN: "1.96.1"
+  NODE_VERSION: "24.15.0"
+  UV_VERSION: "0.11.14"
+  PYTHON_VERSION: "3.12"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   GIT_CONFIG_COUNT: "1"
@@ -34,42 +37,67 @@ env:
 jobs:
   resolve-refs:
     name: Resolve exact revisions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       base_sha: ${{ steps.refs.outputs.base_sha }}
       head_sha: ${{ steps.refs.outputs.head_sha }}
       execution_order: ${{ steps.refs.outputs.execution_order }}
     steps:
       - name: Checkout exact HEAD
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || inputs.head_ref || github.sha }}
+          ref: ${{ inputs.head_ref || github.sha }}
 
       - name: Resolve HEAD and common ancestor
         id: refs
         shell: bash
         env:
-          TARGET_BASE_REF: ${{ github.event.pull_request.base.sha || inputs.base_ref }}
-          HEAD_REF: ${{ github.event.pull_request.head.sha || inputs.head_ref || github.sha }}
-          EVENT_BEFORE: ${{ github.event.before }}
+          TARGET_BASE_REF: ${{ inputs.base_ref }}
+          HEAD_REF: ${{ inputs.head_ref || github.sha }}
         run: |
           set -euo pipefail
 
-          head_sha=$(git rev-parse "${HEAD_REF}^{commit}")
-          target_base_ref=$TARGET_BASE_REF
-          if [[ -z "$target_base_ref" ]]; then
-            if [[ "$GITHUB_EVENT_NAME" == push \
-              && -n "$EVENT_BEFORE" \
-              && "$EVENT_BEFORE" != 0000000000000000000000000000000000000000 ]]; then
-              target_base_ref=$EVENT_BEFORE
+          resolve_commit() {
+            local ref=$1
+            if git rev-parse --verify --quiet "${ref}^{commit}" >/dev/null; then
+              git rev-parse "${ref}^{commit}"
+            elif git rev-parse --verify --quiet "refs/remotes/origin/${ref}^{commit}" >/dev/null; then
+              git rev-parse "refs/remotes/origin/${ref}^{commit}"
             else
+              echo "Unable to resolve commit ref: $ref" >&2
+              exit 1
+            fi
+          }
+
+          head_sha=$(resolve_commit "$HEAD_REF")
+          target_base_ref=$TARGET_BASE_REF
+
+          if [[ -z "$target_base_ref" && "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" == v* ]]; then
+            while IFS= read -r tag_name; do
+              if [[ -z "$tag_name" || "$tag_name" == "$GITHUB_REF_NAME" ]]; then
+                continue
+              fi
+              tag_commit=$(git rev-parse "${tag_name}^{commit}")
+              if [[ "$tag_commit" != "$head_sha" ]]; then
+                target_base_ref=$tag_name
+                break
+              fi
+            done < <(git tag --sort=-v:refname --merged "$head_sha" --list 'v*')
+          fi
+
+          if [[ -z "$target_base_ref" ]]; then
+            if git rev-parse --verify --quiet "${head_sha}^^{commit}" >/dev/null; then
               target_base_ref="${head_sha}^"
+            else
+              target_base_ref="$head_sha"
             fi
           fi
 
-          target_base_sha=$(git rev-parse "${target_base_ref}^{commit}")
+          target_base_sha=$(resolve_commit "$target_base_ref")
           base_sha=$(git merge-base "$target_base_sha" "$head_sha")
 
           if (( GITHUB_RUN_NUMBER % 2 == 0 )); then
@@ -84,56 +112,69 @@ jobs:
 
   format:
     name: Format
-    runs-on: ubuntu-latest
-    container: rust:1.96.1-bookworm
+    needs: resolve-refs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve-refs.outputs.head_sha }}
 
-      - name: Install rustfmt
-        run: rustup component add rustfmt
+      - name: Setup Rust toolchain
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt
+          cache: "false"
 
       - name: Check formatting
         run: cargo fmt --all --check
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-latest
-    container: rust:1.96.1-bookworm
+    needs: resolve-refs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve-refs.outputs.head_sha }}
 
-      - name: Install AWS-LC build dependencies
-        run: |
-          apt-get update
-          apt-get install --yes --no-install-recommends cmake libclang-dev
-
-      - name: Install clippy
-        run: rustup component add clippy
+      - name: Setup Rust toolchain and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+          install-native-deps: "true"
+          cache: "true"
+          cache-key: clippy
 
       - name: Check clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   nextest:
     name: Nextest
-    runs-on: [self-hosted, moli-ci]
-    container:
-      image: rust:1.96.1-bookworm
-      # Docker seeds new named volumes from the pinned image. Keep toolchains
-      # and Cargo downloads local to each self-hosted Docker daemon. Bump both
-      # volume names when the image or Rust toolchain changes.
-      volumes:
-        - moli-ci-cargo-home-1-96-1-v1:/usr/local/cargo
-        - moli-ci-rustup-home-1-96-1-v1:/usr/local/rustup
+    needs: resolve-refs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve-refs.outputs.head_sha }}
 
-      - name: Install AWS-LC build dependencies
-        run: |
-          apt-get update
-          apt-get install --yes --no-install-recommends cmake libclang-dev
+      - name: Setup Rust toolchain and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          install-native-deps: "true"
+          cache: "true"
+          cache-key: nextest
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@13608cbb45b01feb47ef444ab1a42dc41ad56f1a # v2.79.11
@@ -145,17 +186,21 @@ jobs:
 
   python-harness-tests:
     name: Python harness tests
-    runs-on: ubuntu-latest
+    needs: resolve-refs
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve-refs.outputs.head_sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          version: 0.11.14
-          python-version: "3.12"
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
           cache-dependency-glob: |
             moli-benchmark/uv.lock
@@ -196,21 +241,30 @@ jobs:
 
   node-harness-tests:
     name: Node harness and fixture tests
-    runs-on: ubuntu-latest
+    needs: resolve-refs
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          node-version: 24.15.0
+          persist-credentials: false
+          ref: ${{ needs.resolve-refs.outputs.head_sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: |
             moli-frontend-smoke/package-lock.json
             moli-benchmark/browser-spider-local/package-lock.json
+
       - name: Install dependencies
         run: |
           npm ci --prefix moli-frontend-smoke
           npm ci --prefix moli-benchmark/browser-spider-local
+
       - name: Validate frontend fixtures
         working-directory: moli-frontend-smoke
         run: |
@@ -218,160 +272,234 @@ jobs:
           npm run test:node
           npm run typecheck
           npm run build
+
       - name: Test Spider harness
         working-directory: moli-benchmark/browser-spider-local
         run: npm test
-      - name: Test trusted report helpers
+
+      - name: Test report helpers
         run: node --test .github/scripts/*.test.cjs
 
   build-release-head:
     name: Build release · HEAD
     needs: resolve-refs
-    runs-on: [self-hosted, moli-ci]
-    timeout-minutes: 60
-    container:
-      image: rust:1.96.1-bookworm
-      volumes:
-        - moli-ci-cargo-home-1-96-1-v1:/usr/local/cargo
-        - moli-ci-rustup-home-1-96-1-v1:/usr/local/rustup
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout HEAD
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
-      - name: Install AWS-LC build dependencies
-        run: |
-          apt-get update
-          apt-get install --yes --no-install-recommends cmake libclang-dev
+
+      - name: Restore cached release binary
+        id: binary-cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/ci-bin-cache/moli
+          key: ci-release-bin-v1-ubuntu-24.04-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN }}-${{ needs.resolve-refs.outputs.head_sha }}
+
+      - name: Setup Rust toolchain and cache
+        if: steps.binary-cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          install-native-deps: "true"
+          cache: "true"
+          cache-key: ci-release
+
       - name: Build release binary
-        run: cargo build --release --locked -p moli
+        if: steps.binary-cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          CACHE_DIR: ${{ runner.temp }}/ci-bin-cache
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p moli
+          mkdir -p "$CACHE_DIR"
+          install -m 0755 target/release/moli "$CACHE_DIR/moli"
+
       - name: Package release artifact
         shell: bash
+        env:
+          REVISION: ${{ needs.resolve-refs.outputs.head_sha }}
+          CACHE_BIN: ${{ runner.temp }}/ci-bin-cache/moli
         run: |
           set -euo pipefail
           package_dir=target/ci-package/moli-release-head
           mkdir -p "$package_dir"
-          install -m 0755 target/release/moli "$package_dir/moli"
-          printf '%s\n' '${{ needs.resolve-refs.outputs.head_sha }}' > "$package_dir/revision.txt"
+          install -m 0755 "$CACHE_BIN" "$package_dir/moli"
+          printf '%s\n' "$REVISION" > "$package_dir/revision.txt"
           (cd "$package_dir" && sha256sum moli > SHA256SUMS)
           tar -C target/ci-package -czf target/moli-release-head.tar.gz moli-release-head
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+
+      - name: Upload HEAD release artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: moli-release-head
           path: target/moli-release-head.tar.gz
           compression-level: 0
           if-no-files-found: error
+          overwrite: true
           retention-days: 3
 
   build-release-base:
     name: Build release · common ancestor
     needs: resolve-refs
-    runs-on: [self-hosted, moli-ci]
-    timeout-minutes: 60
-    container:
-      image: rust:1.96.1-bookworm
-      volumes:
-        - moli-ci-cargo-home-1-96-1-v1:/usr/local/cargo
-        - moli-ci-rustup-home-1-96-1-v1:/usr/local/rustup
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # Steps stay inline (no local composite actions) because base_sha may point
+    # to an older tag or commit predating newer files under .github/actions/.
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout common ancestor
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.base_sha }}
-      - name: Install AWS-LC build dependencies
+
+      - name: Restore cached release binary
+        id: binary-cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/ci-bin-cache/moli
+          key: ci-release-bin-v1-ubuntu-24.04-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN }}-${{ needs.resolve-refs.outputs.base_sha }}
+
+      - name: Install native build dependencies and Rust toolchain
+        if: steps.binary-cache.outputs.cache-hit != 'true'
+        shell: bash
         run: |
-          apt-get update
-          apt-get install --yes --no-install-recommends cmake libclang-dev
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends cmake libclang-dev
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+
+      - name: Restore Rust cache
+        if: steps.binary-cache.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ci-release
+
       - name: Build release binary
-        run: cargo build --release --locked -p moli
+        if: steps.binary-cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          CACHE_DIR: ${{ runner.temp }}/ci-bin-cache
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p moli
+          mkdir -p "$CACHE_DIR"
+          install -m 0755 target/release/moli "$CACHE_DIR/moli"
+
       - name: Package release artifact
         shell: bash
+        env:
+          REVISION: ${{ needs.resolve-refs.outputs.base_sha }}
+          CACHE_BIN: ${{ runner.temp }}/ci-bin-cache/moli
         run: |
           set -euo pipefail
           package_dir=target/ci-package/moli-release-base
           mkdir -p "$package_dir"
-          install -m 0755 target/release/moli "$package_dir/moli"
-          printf '%s\n' '${{ needs.resolve-refs.outputs.base_sha }}' > "$package_dir/revision.txt"
+          install -m 0755 "$CACHE_BIN" "$package_dir/moli"
+          printf '%s\n' "$REVISION" > "$package_dir/revision.txt"
           (cd "$package_dir" && sha256sum moli > SHA256SUMS)
           tar -C target/ci-package -czf target/moli-release-base.tar.gz moli-release-base
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+
+      - name: Upload base release artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: moli-release-base
           path: target/moli-release-base.tar.gz
           compression-level: 0
           if-no-files-found: error
+          overwrite: true
           retention-days: 3
 
   cdp-smoke:
     name: CDP smoke
     needs: [resolve-refs, build-release-head]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
-    container: rust:1.96.1-bookworm
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
+
       - name: Use HEAD release
         uses: ./.github/actions/use-ci-release
         with:
           side: head
           revision: ${{ needs.resolve-refs.outputs.head_sha }}
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          version: 0.11.14
-          python-version: "3.12"
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
           cache-dependency-glob: moli-cdp-smoke/uv.lock
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: 24.15.0
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: moli-cdp-smoke/package-lock.json
+
       - name: Install dependencies
         run: |
           uv sync --project moli-cdp-smoke --locked
           npm ci --prefix moli-cdp-smoke
+
       - name: Run full CDP smoke
         run: |
           export MOLI_BIN="$PWD/target/ci-bin/moli-release-head/moli"
           uv run --project moli-cdp-smoke --no-sync moli-cdp-smoke \
             --jobs 4 --output-dir target/smoke/cdp-ci
+
       - name: Upload diagnostics
-        if: ${{ always() }}
+        if: ${{ always() && !cancelled() }}
         continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cdp-smoke-diagnostics
           path: target/smoke/cdp-ci
           if-no-files-found: warn
+          overwrite: true
           retention-days: 7
 
   webdriver-smoke:
     name: WebDriver smoke
     needs: [resolve-refs, build-release-head]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
-    container: rust:1.96.1-bookworm
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
+
       - name: Use HEAD release
         uses: ./.github/actions/use-ci-release
         with:
           side: head
           revision: ${{ needs.resolve-refs.outputs.head_sha }}
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          version: 0.11.14
-          python-version: "3.12"
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
           cache-dependency-glob: moli-webdriver-smoke/uv.lock
+
       - name: Install dependencies
         run: uv sync --project moli-webdriver-smoke --locked
+
       - name: Run full WebDriver smoke
         shell: bash
         run: |
@@ -381,91 +509,107 @@ jobs:
           uv run --project moli-webdriver-smoke --no-sync \
             moli-webdriver-smoke --continue-on-failure \
             2>&1 | tee target/smoke/webdriver-ci/run.log
+
       - name: Upload diagnostics
-        if: ${{ always() }}
+        if: ${{ always() && !cancelled() }}
         continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: webdriver-smoke-diagnostics
           path: target/smoke/webdriver-ci
           if-no-files-found: warn
+          overwrite: true
           retention-days: 7
 
   frontend-differential:
     name: Frontend differential · 1020 cases
     needs: [resolve-refs, build-release-head]
-    runs-on: [self-hosted, moli-ci]
-    timeout-minutes: 45
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     container: mcr.microsoft.com/playwright/python:v1.58.0-noble
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
+
       - name: Use HEAD release
         uses: ./.github/actions/use-ci-release
         with:
           side: head
           revision: ${{ needs.resolve-refs.outputs.head_sha }}
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          version: 0.11.14
-          python-version: "3.12"
-          enable-cache: true
-          cache-dependency-glob: |
-            moli-frontend-smoke/uv.lock
-            moli-cdp-smoke/uv.lock
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 24.15.0
-      - name: Install dependencies and build fixtures
-        run: |
-          uv sync --project moli-frontend-smoke --locked
-          uv sync --project moli-cdp-smoke --locked
-          npm ci --prefix moli-frontend-smoke
-          npm run build --prefix moli-frontend-smoke
+
       - name: Resolve pinned Chromium
         id: chromium
         shell: bash
         run: |
           set -euo pipefail
-          chromium_bin=$(uv run --project moli-cdp-smoke --no-sync python -c \
+          chromium_bin=$(python3 -c \
             'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.chromium.executable_path); p.stop()')
           test -x "$chromium_bin"
           wrapper="$PWD/target/ci-bin/chromium-ci"
           printf '%s\n' '#!/bin/sh' "exec \"$chromium_bin\" --no-sandbox \"\$@\"" > "$wrapper"
           chmod 0755 "$wrapper"
           echo "binary=$wrapper" >> "$GITHUB_OUTPUT"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: moli-frontend-smoke/uv.lock
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: moli-frontend-smoke/package-lock.json
+
+      - name: Install dependencies and build fixtures
+        run: |
+          uv sync --project moli-frontend-smoke --locked
+          npm ci --prefix moli-frontend-smoke
+          npm run build --prefix moli-frontend-smoke
+
       - name: Run full differential
         id: frontend
         continue-on-error: true
+        env:
+          CHROMIUM_BIN: ${{ steps.chromium.outputs.binary }}
         # The full catalog runs on shared hosts; leave headroom for transient
         # Chromium stalls without changing any readiness or comparison rules.
         run: >-
           uv run --project moli-frontend-smoke --no-sync moli-frontend-smoke
-          --chromium-bin "${{ steps.chromium.outputs.binary }}"
+          --chromium-bin "$CHROMIUM_BIN"
           --moli-bin "$PWD/target/ci-bin/moli-release-head/moli"
           --timeout-ms 30000
           --reference-infrastructure-retries 1
           --output target/frontend-smoke
+
       - name: Validate frontend artifacts
         id: analysis
-        if: ${{ always() && steps.frontend.outcome != 'skipped' }}
+        if: ${{ always() && !cancelled() && steps.frontend.outcome != 'skipped' }}
         continue-on-error: true
         run: >-
           uv run --project moli-frontend-smoke --no-sync
           moli-frontend-smoke-analyze results target/frontend-smoke
+
       - name: Upload frontend evidence
-        if: ${{ always() && steps.frontend.outcome != 'skipped' }}
+        if: ${{ always() && !cancelled() && steps.frontend.outcome != 'skipped' }}
         continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: frontend-differential-results
           path: target/frontend-smoke
           if-no-files-found: warn
+          overwrite: true
           retention-days: 7
+
       - name: Require differential and artifact validation
-        if: ${{ always() }}
+        if: ${{ !cancelled() && steps.frontend.outcome != 'skipped' }}
         env:
           FRONTEND_OUTCOME: ${{ steps.frontend.outcome }}
           ANALYSIS_OUTCOME: ${{ steps.analysis.outcome }}
@@ -476,161 +620,192 @@ jobs:
   runtime-contracts:
     name: Runtime and CDP session contracts
     needs: [resolve-refs, build-release-head]
-    runs-on: [self-hosted, moli-ci]
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
-    container: rust:1.96.1-bookworm
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
+
       - name: Use HEAD release
         uses: ./.github/actions/use-ci-release
         with:
           side: head
           revision: ${{ needs.resolve-refs.outputs.head_sha }}
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          version: 0.11.14
-          python-version: "3.12"
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
           cache-dependency-glob: moli-benchmark/uv.lock
+
       - name: Install dependencies
         run: uv sync --project moli-benchmark --locked
+
       - name: Run deterministic fetch contracts
         run: >-
           uv run --project moli-benchmark --no-sync moli-benchmark synthetic
           --moli-bin "$PWD/target/ci-bin/moli-release-head/moli"
           --runs 5 --output-dir target/benchmark/runtime-synthetic
+
       - name: Run long-lived CDP session contracts
         run: >-
           uv run --project moli-benchmark --no-sync moli-benchmark cdp-session
           --moli-bin "$PWD/target/ci-bin/moli-release-head/moli"
           --target moli-cdp --gate-target moli-cdp --runs 3
           --output-dir target/benchmark/cdp-session
+
       - name: Upload evidence
-        if: ${{ always() }}
+        if: ${{ always() && !cancelled() }}
         continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runtime-contract-results
           path: target/benchmark
           if-no-files-found: warn
+          overwrite: true
           retention-days: 7
 
   agent-episode:
     name: Agent episodes · Moli vs Chromium
     needs: [resolve-refs, build-release-head]
-    runs-on: [self-hosted, moli-ci]
-    timeout-minutes: 45
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     container: mcr.microsoft.com/playwright/python:v1.58.0-noble
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
+
       - name: Use HEAD release
         uses: ./.github/actions/use-ci-release
         with:
           side: head
           revision: ${{ needs.resolve-refs.outputs.head_sha }}
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          version: 0.11.14
-          python-version: "3.12"
-          enable-cache: true
-          cache-dependency-glob: |
-            moli-benchmark/uv.lock
-            moli-cdp-smoke/uv.lock
-      - name: Install dependencies
-        run: |
-          uv sync --project moli-benchmark --locked
-          uv sync --project moli-cdp-smoke --locked
+
       - name: Resolve pinned Chromium
         id: chromium
+        shell: bash
         run: |
-          chromium_bin=$(uv run --project moli-cdp-smoke --no-sync python -c \
+          set -euo pipefail
+          chromium_bin=$(python3 -c \
             'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.chromium.executable_path); p.stop()')
           test -x "$chromium_bin"
           echo "binary=$chromium_bin" >> "$GITHUB_OUTPUT"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: moli-benchmark/uv.lock
+
+      - name: Install dependencies
+        run: uv sync --project moli-benchmark --locked
+
       - name: Run fast cross-engine contract
+        env:
+          CHROME_BIN: ${{ steps.chromium.outputs.binary }}
         run: >-
           uv run --project moli-benchmark --no-sync moli-benchmark agent-episode
           --moli-bin "$PWD/target/ci-bin/moli-release-head/moli"
-          --chrome-bin "${{ steps.chromium.outputs.binary }}"
+          --chrome-bin "$CHROME_BIN"
           --step-dwell-ms 0 --output-dir target/benchmark/agent-fast
+
       - name: Run idle-resource episode
+        env:
+          CHROME_BIN: ${{ steps.chromium.outputs.binary }}
         run: >-
           uv run --project moli-benchmark --no-sync moli-benchmark agent-episode
           --moli-bin "$PWD/target/ci-bin/moli-release-head/moli"
-          --chrome-bin "${{ steps.chromium.outputs.binary }}"
+          --chrome-bin "$CHROME_BIN"
           --output-dir target/benchmark/agent-resource
+
       - name: Upload evidence
-        if: ${{ always() }}
+        if: ${{ always() && !cancelled() }}
         continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: agent-episode-results
           path: target/benchmark
           if-no-files-found: warn
+          overwrite: true
           retention-days: 7
 
   release-regression:
     name: Release startup, size, and matrix A/B
     needs: [resolve-refs, build-release-head, build-release-base]
-    runs-on: [self-hosted, moli-ci]
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
-    container: rust:1.96.1-bookworm
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
+
       - name: Use HEAD release
         uses: ./.github/actions/use-ci-release
         with:
           side: head
           revision: ${{ needs.resolve-refs.outputs.head_sha }}
+
       - name: Use base release
         uses: ./.github/actions/use-ci-release
         with:
           side: base
           revision: ${{ needs.resolve-refs.outputs.base_sha }}
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          version: 0.11.14
-          python-version: "3.12"
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
           cache-dependency-glob: moli-benchmark/uv.lock
-      - run: uv sync --project moli-benchmark --locked
+
+      - name: Install dependencies
+        run: uv sync --project moli-benchmark --locked
+
       - name: Measure common-ancestor startup and package
         continue-on-error: true
         run: >-
           uv run --project moli-benchmark --no-sync moli-benchmark startup
           --moli-bin "$PWD/target/ci-bin/moli-release-base/moli"
           --profile formal --output-dir target/release-regression/base-startup
+
       - name: Require HEAD startup and package workflow
         run: >-
           uv run --project moli-benchmark --no-sync moli-benchmark startup
           --moli-bin "$PWD/target/ci-bin/moli-release-head/moli"
           --profile formal --baseline-report target/release-regression/base-startup
           --output-dir target/release-regression/head-startup
+
       - name: Measure common-ancestor concurrency matrix
         continue-on-error: true
         run: >-
           uv run --project moli-benchmark --no-sync moli-benchmark synthetic-matrix
           --moli-bin "$PWD/target/ci-bin/moli-release-base/moli"
           --profile smoke --output-dir target/release-regression/base-matrix
+
       - name: Require HEAD concurrency matrix
         run: >-
           uv run --project moli-benchmark --no-sync moli-benchmark synthetic-matrix
           --moli-bin "$PWD/target/ci-bin/moli-release-head/moli"
           --profile smoke --baseline-report target/release-regression/base-matrix
           --output-dir target/release-regression/head-matrix
+
       - name: Upload evidence
-        if: ${{ always() }}
+        if: ${{ always() && !cancelled() }}
         continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-regression-results
           # Package sizes stay in the JSON reports and image manifests. Upload
@@ -640,28 +815,37 @@ jobs:
             target/release-regression/**/*.csv
             target/release-regression/**/*.md
           if-no-files-found: warn
+          overwrite: true
           retention-days: 7
 
   spider-fixture:
     name: Deterministic Spider fixture
     needs: [resolve-refs, build-release-head]
-    runs-on: [self-hosted, moli-ci]
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
-    container: rust:1.96.1-bookworm
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
+
       - name: Use HEAD release
         uses: ./.github/actions/use-ci-release
         with:
           side: head
           revision: ${{ needs.resolve-refs.outputs.head_sha }}
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: 24.15.0
-      - run: npm ci --prefix moli-benchmark/browser-spider-local
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: moli-benchmark/browser-spider-local/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --prefix moli-benchmark/browser-spider-local
+
       - name: Require exact fixture contract
         run: >-
           node moli-benchmark/browser-spider-local/bench.mjs
@@ -671,57 +855,70 @@ jobs:
           --site-source fixture --goto-timeout-ms 1500 --server-hang-ms 3000
           --sample-interval-ms 100 --assert-fixture-contract
           --output-dir target/spider-fixture
+
       - name: Upload evidence
-        if: ${{ always() }}
+        if: ${{ always() && !cancelled() }}
         continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: spider-fixture-results
           path: target/spider-fixture
           if-no-files-found: warn
+          overwrite: true
           retention-days: 7
 
   spider-bench:
     name: Spider public-web A/B
     needs: [resolve-refs, build-release-head, build-release-base]
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
-      github.actor != 'dependabot[bot]')
-    runs-on: [self-hosted, moli-ci]
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
-    container: rust:1.96.1-bookworm
     env:
       BENCHMARK_OUTPUT: spider-bench-results
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
+
       - name: Use HEAD release
         uses: ./.github/actions/use-ci-release
         with:
           side: head
           revision: ${{ needs.resolve-refs.outputs.head_sha }}
+
       - name: Use base release
         uses: ./.github/actions/use-ci-release
         with:
           side: base
           revision: ${{ needs.resolve-refs.outputs.base_sha }}
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: 24.15.0
-      - run: npm ci --prefix moli-benchmark/browser-spider-local
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: moli-benchmark/browser-spider-local/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --prefix moli-benchmark/browser-spider-local
+
       - name: Run deterministic and public-web A/B
+        env:
+          BASE_SHA: ${{ needs.resolve-refs.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.resolve-refs.outputs.head_sha }}
+          EXECUTION_ORDER: ${{ needs.resolve-refs.outputs.execution_order }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: >-
           node moli-benchmark/browser-spider-local/compare.mjs run
           --base-bin "$PWD/target/ci-bin/moli-release-base/moli"
           --head-bin "$PWD/target/ci-bin/moli-release-head/moli"
-          --base-sha "${{ needs.resolve-refs.outputs.base_sha }}"
-          --head-sha "${{ needs.resolve-refs.outputs.head_sha }}"
-          --execution-order "${{ needs.resolve-refs.outputs.execution_order }}"
+          --base-sha "$BASE_SHA"
+          --head-sha "$HEAD_SHA"
+          --execution-order "$EXECUTION_ORDER"
           --output-dir "$BENCHMARK_OUTPUT"
-          --run-url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          --run-url "$RUN_URL"
+
       - name: Render job summary
         if: ${{ always() && !cancelled() }}
         continue-on-error: true
@@ -729,49 +926,54 @@ jobs:
           if [[ -f "$BENCHMARK_OUTPUT/comment.md" ]]; then
             cat "$BENCHMARK_OUTPUT/comment.md" >> "$GITHUB_STEP_SUMMARY"
           fi
+
       - name: Upload full evidence
         if: ${{ always() && !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: spider-bench-results
           path: ${{ env.BENCHMARK_OUTPUT }}
-          if-no-files-found: error
+          if-no-files-found: warn
+          overwrite: true
           retention-days: 14
 
   sequential-navigation-soak:
     name: Sequential navigation soak · 200 A/B
     needs: [resolve-refs, build-release-head, build-release-base]
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
-      github.actor != 'dependabot[bot]')
-    runs-on: [self-hosted, moli-ci]
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
-    container: rust:1.96.1-bookworm
     env:
       BENCHMARK_OUTPUT: sequential-navigation-soak-results
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
+
       - name: Use HEAD release
         uses: ./.github/actions/use-ci-release
         with:
           side: head
           revision: ${{ needs.resolve-refs.outputs.head_sha }}
+
       - name: Use base release
         uses: ./.github/actions/use-ci-release
         with:
           side: base
           revision: ${{ needs.resolve-refs.outputs.base_sha }}
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          version: 0.11.14
-          python-version: "3.12"
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
           cache-dependency-glob: moli-benchmark/uv.lock
-      - run: uv sync --project moli-benchmark --locked
+
+      - name: Install dependencies
+        run: uv sync --project moli-benchmark --locked
+
       - name: Run one-session public-web A/B
         id: soak
         shell: bash
@@ -805,26 +1007,34 @@ jobs:
             run_side base "$PWD/target/ci-bin/moli-release-base/moli"
             run_side head "$PWD/target/ci-bin/moli-release-head/moli"
           fi
+
       - name: Compare resilience and memory evidence
         id: comparison
         if: ${{ always() && !cancelled() && steps.soak.outcome == 'success' }}
         env:
           PYTHONPATH: moli-benchmark
+          BASE_EXIT_CODE: ${{ steps.soak.outputs.base_exit_code }}
+          HEAD_EXIT_CODE: ${{ steps.soak.outputs.head_exit_code }}
+          BASE_SHA: ${{ needs.resolve-refs.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.resolve-refs.outputs.head_sha }}
+          EXECUTION_ORDER: ${{ needs.resolve-refs.outputs.execution_order }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: >-
           uv run --project moli-benchmark --no-sync python
           -m moli_benchmark.sequential_navigate_ci compare
           --base-report "$BENCHMARK_OUTPUT/base.json"
           --head-report "$BENCHMARK_OUTPUT/head.json"
-          --base-exit-code "${{ steps.soak.outputs.base_exit_code }}"
-          --head-exit-code "${{ steps.soak.outputs.head_exit_code }}"
-          --base-sha "${{ needs.resolve-refs.outputs.base_sha }}"
-          --head-sha "${{ needs.resolve-refs.outputs.head_sha }}"
-          --execution-order "${{ needs.resolve-refs.outputs.execution_order }}"
+          --base-exit-code "$BASE_EXIT_CODE"
+          --head-exit-code "$HEAD_EXIT_CODE"
+          --base-sha "$BASE_SHA"
+          --head-sha "$HEAD_SHA"
+          --execution-order "$EXECUTION_ORDER"
           --expected-navigations 200
           --output "$BENCHMARK_OUTPUT/comparison.json"
           --comment-output "$BENCHMARK_OUTPUT/comment.md"
-          --run-url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          --run-url "$RUN_URL"
           --conclusion local
+
       - name: Render job summary
         if: ${{ always() && !cancelled() }}
         continue-on-error: true
@@ -832,14 +1042,17 @@ jobs:
           if [[ -f "$BENCHMARK_OUTPUT/comment.md" ]]; then
             cat "$BENCHMARK_OUTPUT/comment.md" >> "$GITHUB_STEP_SUMMARY"
           fi
+
       - name: Upload full evidence
         if: ${{ always() && !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sequential-navigation-soak-results
           path: ${{ env.BENCHMARK_OUTPUT }}
-          if-no-files-found: error
+          if-no-files-found: warn
+          overwrite: true
           retention-days: 14
+
       - name: Require complete HEAD resilience evidence
         if: ${{ always() && !cancelled() && steps.comparison.outcome == 'success' }}
         env:
@@ -848,3 +1061,92 @@ jobs:
           uv run --project moli-benchmark --no-sync python
           -m moli_benchmark.sequential_navigate_ci check
           --input "$BENCHMARK_OUTPUT/comparison.json"
+
+  regression-report:
+    name: Aggregate regression report
+    needs:
+      - resolve-refs
+      - release-regression
+      - frontend-differential
+      - agent-episode
+      - runtime-contracts
+      - cdp-smoke
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve-refs.outputs.head_sha || github.sha }}
+
+      - name: Download release regression evidence
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-regression-results
+          path: ci-regression-artifacts/release
+
+      - name: Download frontend differential evidence
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: frontend-differential-results
+          path: ci-regression-artifacts/frontend
+
+      - name: Download agent episode evidence
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: agent-episode-results
+          path: ci-regression-artifacts/agent
+
+      - name: Download runtime contract evidence
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: runtime-contract-results
+          path: ci-regression-artifacts/runtime
+
+      - name: Download CDP smoke evidence
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cdp-smoke-diagnostics
+          path: ci-regression-artifacts/cdp
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Render and publish summary
+        shell: bash
+        env:
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          NEEDS_RESULTS: >-
+            ${{ needs.release-regression.result }}
+            ${{ needs.frontend-differential.result }}
+            ${{ needs.agent-episode.result }}
+            ${{ needs.runtime-contracts.result }}
+            ${{ needs.cdp-smoke.result }}
+        run: |
+          set -euo pipefail
+          conclusion=success
+          for result in $NEEDS_RESULTS; do
+            if [[ "$result" != "success" ]]; then
+              conclusion=failure
+              break
+            fi
+          done
+          node .github/scripts/render-ci-regression-comment.cjs \
+            --release ci-regression-artifacts/release \
+            --frontend ci-regression-artifacts/frontend \
+            --agent ci-regression-artifacts/agent \
+            --runtime ci-regression-artifacts/runtime \
+            --cdp ci-regression-artifacts/cdp \
+            --run-url "$RUN_URL" \
+            --conclusion "$conclusion" \
+            --output ci-regression-report.md
+          cat ci-regression-report.md >> "$GITHUB_STEP_SUMMARY"

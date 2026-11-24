@@ -248,3 +248,17 @@ test('rejects an unbounded frontend result list as unavailable', (t) => {
   const report = renderReport({ frontendRoot, conclusion: 'failure' });
   assert.match(report, /artifacts: `0\/5`/);
 });
+
+test('renders HEAD release metrics even when optional base artifacts are missing', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moli-ci-report-head-only-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const releaseRoot = path.join(root, 'release');
+  writeJson(releaseRoot, 'head-startup/startup/summary.json', startupSummary(10));
+  writeJson(releaseRoot, 'head-matrix/synthetic-matrix/summary.json', matrixSummary(2));
+  writeJson(releaseRoot, 'head-matrix/synthetic-matrix/matrix.json', matrixRows(2));
+
+  const report = renderReport({ releaseRoot, conclusion: 'success' });
+  assert.match(report, /artifacts: `1\/5`/);
+  assert.match(report, /HEAD\/base failures 0\/—; raw binary —/);
+  assert.match(report, /Raw binary \| — \| 110 B \| — \| —/);
+});

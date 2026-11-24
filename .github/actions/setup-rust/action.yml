@@ -1,0 +1,90 @@
+name: Setup Rust toolchain
+description: Install the pinned Rust toolchain, optional Linux build deps, and Cargo cache.
+
+inputs:
+  toolchain:
+    description: Exact Rust toolchain version (for example, 1.96.1).
+    required: false
+    default: "1.96.1"
+  components:
+    description: Comma-separated rustup components to install (for example, rustfmt or clippy).
+    required: false
+    default: ""
+  install-native-deps:
+    description: Install Linux native build dependencies (cmake, libclang-dev).
+    required: false
+    default: "false"
+  cache:
+    description: Enable Swatinem/rust-cache.
+    required: false
+    default: "true"
+  cache-key:
+    description: Shared cache key for Swatinem/rust-cache.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install Linux native build dependencies
+      if: runner.os == 'Linux' && inputs.install-native-deps == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v sudo >/dev/null 2>&1; then
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends cmake libclang-dev
+        else
+          apt-get update
+          apt-get install --yes --no-install-recommends cmake libclang-dev
+        fi
+
+    - name: Install Rust toolchain (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain }}
+        COMPONENTS: ${{ inputs.components }}
+      run: |
+        set -euo pipefail
+        rustup_args=(toolchain install "$TOOLCHAIN" --profile minimal --no-self-update)
+        if [[ -n "$COMPONENTS" ]]; then
+          IFS=',' read -ra component_list <<< "$COMPONENTS"
+          for component in "${component_list[@]}"; do
+            if [[ -n "$component" ]]; then
+              rustup_args+=(--component "$component")
+            fi
+          done
+        fi
+        rustup "${rustup_args[@]}"
+        rustup default "$TOOLCHAIN"
+        rustc --version
+        cargo --version
+
+    - name: Install Rust toolchain (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain }}
+        COMPONENTS: ${{ inputs.components }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        $PSNativeCommandUseErrorActionPreference = $true
+        $rustupArgs = @("toolchain", "install", $env:TOOLCHAIN, "--profile", "minimal", "--no-self-update")
+        if ($env:COMPONENTS) {
+          foreach ($component in $env:COMPONENTS.Split(",")) {
+            if ($component) {
+              $rustupArgs += @("--component", $component)
+            }
+          }
+        }
+        rustup @rustupArgs
+        rustup default $env:TOOLCHAIN
+        rustc --version
+        cargo --version
+
+    - name: Restore Rust cache
+      if: inputs.cache == 'true'
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        shared-key: ${{ inputs.cache-key }}

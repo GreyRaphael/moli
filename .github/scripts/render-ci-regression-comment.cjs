@@ -204,26 +204,44 @@ function statusIcon(failureCount) {
   return failureCount === 0 ? '✅' : '❌';
 }
 
+function readOptionalJson(root, relativePath) {
+  try {
+    return readJson(root, relativePath);
+  } catch {
+    return null;
+  }
+}
+
 function loadRelease(root) {
-  const baseStartup = readJson(root, 'base-startup/startup/summary.json');
   const headStartup = readJson(root, 'head-startup/startup/summary.json');
-  const baseMatrix = readJson(root, 'base-matrix/synthetic-matrix/summary.json');
   const headMatrix = readJson(root, 'head-matrix/synthetic-matrix/summary.json');
-  const baseMatrixRows = readJson(root, 'base-matrix/synthetic-matrix/matrix.json');
   const headMatrixRows = readJson(root, 'head-matrix/synthetic-matrix/matrix.json');
   if (
-    !isObject(baseStartup) ||
     !isObject(headStartup) ||
-    !isObject(baseMatrix) ||
     !isObject(headMatrix) ||
-    !Array.isArray(baseMatrixRows) ||
     !Array.isArray(headMatrixRows) ||
-    baseMatrixRows.length > MAX_MATRIX_ROWS ||
     headMatrixRows.length > MAX_MATRIX_ROWS
   ) {
     throw new Error('invalid release regression artifact');
   }
-  return { baseStartup, headStartup, baseMatrix, headMatrix, baseMatrixRows, headMatrixRows };
+  const rawBaseStartup = readOptionalJson(root, 'base-startup/startup/summary.json');
+  const rawBaseMatrix = readOptionalJson(root, 'base-matrix/synthetic-matrix/summary.json');
+  const rawBaseMatrixRows = readOptionalJson(root, 'base-matrix/synthetic-matrix/matrix.json');
+  const baseStartup = isObject(rawBaseStartup) ? rawBaseStartup : null;
+  const baseMatrix = isObject(rawBaseMatrix) ? rawBaseMatrix : null;
+  const baseMatrixRows =
+    Array.isArray(rawBaseMatrixRows) && rawBaseMatrixRows.length <= MAX_MATRIX_ROWS
+      ? rawBaseMatrixRows
+      : [];
+  return {
+    baseStartup: baseStartup ?? {},
+    headStartup,
+    baseMatrix: baseMatrix ?? {},
+    headMatrix,
+    baseMatrixRows,
+    headMatrixRows,
+    baseAvailable: baseStartup !== null || baseMatrix !== null,
+  };
 }
 
 function matrixAggregate(summary, rows, concurrency) {
@@ -250,13 +268,15 @@ function releaseOverview(section) {
   if (!section.available) {
     return { status: '⚪', signal: 'artifact unavailable or invalid' };
   }
-  const { baseStartup, headStartup, baseMatrix, headMatrix } = section.data;
-  const baseFailures = (failures(baseStartup) ?? 0) + (failures(baseMatrix) ?? 0);
+  const { baseStartup, headStartup, baseMatrix, headMatrix, baseAvailable } = section.data;
+  const baseFailures = baseAvailable
+    ? (failures(baseStartup) ?? 0) + (failures(baseMatrix) ?? 0)
+    : null;
   const headFailures = (failures(headStartup) ?? 0) + (failures(headMatrix) ?? 0);
-  const rawBase = metric(section.data.baseStartup, 'binary-size', 'binary_bytes');
+  const rawBase = metric(baseStartup, 'binary-size', 'binary_bytes');
   const rawHead = metric(headStartup, 'binary-size', 'binary_bytes');
   return {
-    status: headFailures > 0 ? '❌' : baseFailures > 0 ? '⚠️' : '✅',
+    status: headFailures > 0 ? '❌' : (baseFailures ?? 0) > 0 ? '⚠️' : '✅',
     signal: `HEAD/base failures ${formatInteger(headFailures)}/${formatInteger(baseFailures)}; raw binary ${percentDelta(rawBase, rawHead, 6)}`,
   };
 }

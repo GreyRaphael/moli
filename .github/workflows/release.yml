@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version from moli/Cargo.toml (for example, 0.1.1)
+        description: Version from moli/Cargo.toml (for example, 1.1.11)
         required: false
         type: string
       prerelease:
@@ -22,13 +22,15 @@ on:
         type: boolean
 
 concurrency:
-  group: release-${{ inputs.version || github.ref_name }}
+  group: >-
+    release-${{ inputs.version && (startsWith(inputs.version, 'v') && inputs.version || format('v{0}', inputs.version)) || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 env:
+  RUST_TOOLCHAIN: "1.96.1"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   GIT_CONFIG_COUNT: "1"
@@ -38,7 +40,7 @@ env:
 jobs:
   validate:
     name: Validate release request
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       tag: ${{ steps.release.outputs.tag }}
@@ -47,13 +49,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0
+          fetch-depth: 1
+          fetch-tags: true
           persist-credentials: false
 
-      - name: Validate version and tag
+      - name: Validate shell installer
+        shell: bash
+        run: sh -n scripts/install.sh
+
+      - name: Validate version, tag, and release state
         id: release
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
@@ -73,7 +81,7 @@ jobs:
             exit 1
           fi
 
-          manifest_version=$(awk '$1 == "version" && $2 == "=" { gsub(/"/, "", $3); print $3; exit }' moli/Cargo.toml)
+          manifest_version=$(python3 -c 'import tomllib; print(tomllib.load(open("moli/Cargo.toml", "rb"))["package"]["version"])')
           if [[ "$version" != "$manifest_version" ]]; then
             echo "Requested version $version does not match moli/Cargo.toml ($manifest_version)." >&2
             exit 1
@@ -82,6 +90,11 @@ jobs:
           tag="v$version"
           if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]] && git show-ref --verify --quiet "refs/tags/$tag"; then
             echo "Tag $tag already exists." >&2
+            exit 1
+          fi
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "GitHub Release $tag already exists." >&2
             exit 1
           fi
 
@@ -98,37 +111,42 @@ jobs:
       matrix:
         include:
           - arch: x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             artifact: release-linux-x86_64
           - arch: aarch64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact: release-linux-aarch64
+    # Keep Debian 12 (glibc 2.36) for publicly distributed Linux release archives.
     container: rust:1.96.1-bookworm
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0
           persist-credentials: false
 
       - name: Install packaging dependencies
         shell: bash
         run: |
+          set -euo pipefail
           apt-get update
           apt-get install --yes --no-install-recommends binutils cmake libclang-dev python3
 
-      - name: Validate shell installer
-        shell: bash
-        run: sh -n scripts/install.sh
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: release-${{ matrix.target }}
 
       - name: Build and package
         shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          EXPECTED_TARGET: ${{ matrix.target }}
         run: >-
           python3 scripts/release.py
-          --version "${{ needs.validate.outputs.version }}"
-          --expected-target "${{ matrix.target }}"
+          --version "$RELEASE_VERSION"
+          --expected-target "$EXPECTED_TARGET"
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -137,6 +155,7 @@ jobs:
           path: dist/
           if-no-files-found: error
           compression-level: 0
+          overwrite: true
           retention-days: 7
 
   build-macos:
@@ -158,32 +177,28 @@ jobs:
             artifact: release-macos-aarch64
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
-      RUSTUP_TOOLCHAIN: "1.96.1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0
           persist-credentials: false
 
-      - name: Install pinned Rust toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          toolchain="${RUSTUP_TOOLCHAIN:-1.96.1}"
-          if [[ -f rust-toolchain ]]; then
-            toolchain=$(tr -d '[:space:]' < rust-toolchain)
-          fi
-          rustup toolchain install "$toolchain" --profile minimal --no-self-update
-          rustup default "$toolchain"
-          rustc --version
+      - name: Setup Rust toolchain and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          cache: "true"
+          cache-key: release-${{ matrix.target }}
 
       - name: Build and package
         shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          EXPECTED_TARGET: ${{ matrix.target }}
         run: >-
           python3 scripts/release.py
-          --version "${{ needs.validate.outputs.version }}"
-          --expected-target "${{ matrix.target }}"
+          --version "$RELEASE_VERSION"
+          --expected-target "$EXPECTED_TARGET"
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -192,6 +207,7 @@ jobs:
           path: dist/
           if-no-files-found: error
           compression-level: 0
+          overwrite: true
           retention-days: 7
 
   build-windows:
@@ -211,26 +227,21 @@ jobs:
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
             artifact: release-windows-aarch64
-    env:
-      RUSTUP_TOOLCHAIN: "1.96.1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0
           persist-credentials: false
 
-      - name: Install pinned Rust toolchain
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $true
-          $toolchain = if (Test-Path rust-toolchain) { (Get-Content rust-toolchain -Raw).Trim() } else { "1.96.1" }
-          rustup toolchain install $toolchain --profile minimal --no-self-update
-          rustup default $toolchain
-          rustc --version
+      - name: Setup Rust toolchain and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          cache: "true"
+          cache-key: release-${{ matrix.target }}
 
       - name: Validate PowerShell installer
+        if: matrix.arch == 'x86_64'
         shell: pwsh
         run: |
           $tokens = $null
@@ -247,10 +258,13 @@ jobs:
 
       - name: Build and package
         shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          EXPECTED_TARGET: ${{ matrix.target }}
         run: >-
           python scripts/release.py
-          --version "${{ needs.validate.outputs.version }}"
-          --expected-target "${{ matrix.target }}"
+          --version "$env:RELEASE_VERSION"
+          --expected-target "$env:EXPECTED_TARGET"
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -259,6 +273,7 @@ jobs:
           path: dist/
           if-no-files-found: error
           compression-level: 0
+          overwrite: true
           retention-days: 7
 
   publish:
@@ -268,7 +283,7 @@ jobs:
       - build-linux
       - build-macos
       - build-windows
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
@@ -276,7 +291,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0
+          fetch-depth: 1
+          fetch-tags: true
           persist-credentials: false
 
       - name: Download packaged artifacts
@@ -336,12 +352,24 @@ jobs:
             --repo "$GITHUB_REPOSITORY"
             --title "Moli $RELEASE_TAG"
           )
-          tag_notes=$(git for-each-ref --format='%(contents)' "refs/tags/$RELEASE_TAG" | sed -e '/./,$!d')
+
+          tag_type=$(git for-each-ref --format='%(objecttype)' "refs/tags/$RELEASE_TAG")
+          tag_notes=""
+          if [[ "$tag_type" == "tag" ]]; then
+            tag_notes=$(git for-each-ref --format='%(contents)' "refs/tags/$RELEASE_TAG" | sed -e '/./,$!d')
+          fi
+
           if [[ -n "$tag_notes" ]]; then
             notes_file=$(mktemp)
             trap 'rm -f "$notes_file"' EXIT
             printf '%s\n' "$tag_notes" > "$notes_file"
-            prev_tag=$(git tag --sort=-creatordate --list 'v*' | grep -vxF "$RELEASE_TAG" | head -n 1 || true)
+            prev_tag=""
+            while IFS= read -r tag_name; do
+              if [[ -n "$tag_name" && "$tag_name" != "$RELEASE_TAG" ]]; then
+                prev_tag=$tag_name
+                break
+              fi
+            done < <(git tag --sort=-v:refname --list 'v*')
             if [[ -n "$prev_tag" ]]; then
               printf '\n**完整变更记录**: https://github.com/%s/compare/%s...%s\n' \
                 "$GITHUB_REPOSITORY" "$prev_tag" "$RELEASE_TAG" >> "$notes_file"
@@ -350,6 +378,7 @@ jobs:
           else
             args+=(--generate-notes)
           fi
+
           if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
             args+=(--target "$GITHUB_SHA")
           fi
