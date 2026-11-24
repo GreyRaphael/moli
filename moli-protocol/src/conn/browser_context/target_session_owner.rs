@@ -648,6 +648,13 @@ impl<'a> TargetSessionOwnerMut<'a> {
             .map(|page| (target.target_url().to_owned(), page.document_title()))
     }
 
+    pub(super) fn effective_tls_verify_host(&self, base_tls_verify_host: bool) -> bool {
+        self.target()
+            .tls_verify_host_override
+            .or(self.browser_context.default_tls_verify_host_override)
+            .unwrap_or(base_tls_verify_host)
+    }
+
     pub(super) fn target_url(&self) -> String {
         self.target().target_url().to_owned()
     }

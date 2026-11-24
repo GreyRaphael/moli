@@ -78,6 +78,24 @@ pub fn extract_speculative_script_specifiers(source: &str) -> Vec<String> {
                 i + 4 <= n && (&bytes[i..i + 4] == b"\"../" || &bytes[i..i + 4] == b"'../");
 
             if is_dot_slash || is_dot_dot_slash {
+                // Skip CommonJS require("./...") literals and bundler shim paths
+                // (e.g. axios browser-field maps like "./lib/adapters/xhr.js") that
+                // do not correspond to deployed browser ES module chunks.
+                let preceded_by_require = {
+                    let mut p = i;
+                    while p > 0 && matches!(bytes[p - 1], b' ' | b'\t' | b'\r' | b'\n') {
+                        p -= 1;
+                    }
+                    if p > 0 && bytes[p - 1] == b'(' {
+                        p -= 1;
+                        while p > 0 && matches!(bytes[p - 1], b' ' | b'\t' | b'\r' | b'\n') {
+                            p -= 1;
+                        }
+                        p >= 7 && &bytes[p - 7..p] == b"require"
+                    } else {
+                        false
+                    }
+                };
                 let quote = bytes[i];
                 let start = i + 1;
                 let mut k = start;
@@ -89,12 +107,16 @@ pub fn extract_speculative_script_specifiers(source: &str) -> Vec<String> {
                 {
                     k += 1;
                 }
-                if k < n
+                if !preceded_by_require
+                    && k < n
                     && bytes[k] == quote
                     && k > start
                     && k - start < 300
                     && let Ok(spec) = std::str::from_utf8(&bytes[start..k])
                     && (spec.ends_with(".js") || spec.ends_with(".mjs"))
+                    && !spec.contains("/lib/")
+                    && !spec.contains("/dist/")
+                    && !spec.contains("/node_modules/")
                     && is_valid_specifier_path(spec)
                     && seen.insert(spec.to_owned())
                 {

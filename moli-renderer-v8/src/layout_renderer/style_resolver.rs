@@ -2,7 +2,7 @@ use moli_layout::{
     LayoutDisplay, LayoutError, LayoutStyleResolver, LayoutViewport, ResolvedLayoutElementStyles,
     ResolvedLayoutPseudoStyle, ResolvedLayoutStyle, ResolvedStyleCache,
 };
-use std::time::Instant;
+use std::{collections::HashSet, time::Instant};
 
 use crate::{
     document_runtime::DomHandle,
@@ -12,7 +12,9 @@ use crate::{
 
 pub(super) struct NativeLayoutStyleResolver<'a, 's> {
     runtime: &'a JsContextHost,
+    document: DomHandle,
     reads: StyleObservation<'a>,
+    pre_resolved: HashSet<DomHandle>,
     cache: &'s mut ResolvedStyleCache,
     scripting_enabled: bool,
     profile: Option<NativeLayoutStyleResolverProfile>,
@@ -44,11 +46,16 @@ impl<'a, 's> NativeLayoutStyleResolver<'a, 's> {
     ) -> Self {
         let mut reads = layout_style_read_scope(runtime, document, viewport);
         let _ = reads.read(root).computed_values();
+        let scripting_enabled = runtime.document_scripting_enabled(document);
+        let pre_resolved =
+            runtime.pre_resolve_layout_tree_styles(document, root, scripting_enabled);
         Self {
             runtime,
+            document,
             reads,
+            pre_resolved,
             cache,
-            scripting_enabled: runtime.document_scripting_enabled(document),
+            scripting_enabled,
             profile: moli_trace::cpu_profile_enabled()
                 .then(NativeLayoutStyleResolverProfile::default),
         }
@@ -110,8 +117,14 @@ impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_, '_> {
         node: DomHandle,
     ) -> Result<Option<ResolvedLayoutElementStyles>, LayoutError> {
         let phase_started = self.profile.as_ref().map(|_| Instant::now());
-        let read = self.reads.read(node);
-        let Some((computed, before, after)) = read.into_element_computed_values() else {
+        let styles = if self.pre_resolved.contains(&node) {
+            self.runtime
+                .cached_element_computed_values(self.document, node)
+                .or_else(|| self.reads.read(node).into_element_computed_values())
+        } else {
+            self.reads.read(node).into_element_computed_values()
+        };
+        let Some((computed, before, after)) = styles else {
             if let Some(profile) = self.profile.as_mut() {
                 profile.primary_count = profile.primary_count.saturating_add(1);
                 profile.primary_read_ns = profile.primary_read_ns.saturating_add(

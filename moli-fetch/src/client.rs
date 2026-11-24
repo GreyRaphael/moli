@@ -221,9 +221,7 @@ impl FetchClientHandle {
 
 impl FetchClient {
     pub fn new(config: &FetchConfig, cookie_store: SharedBrowserCookieStore) -> Self {
-        if let Err(error) = crate::blocking::trim_http_cache(config) {
-            tracing::debug!("failed to trim HTTP cache during fetch client startup: {error}");
-        }
+        schedule_http_cache_trim_once(config);
         let client_hint_preferences =
             Arc::new(parking_lot::Mutex::new(ClientHintPreferences::default()));
         let runtime_owner = FetchRuntimeOwner::new_with_client_hint_preferences(
@@ -266,6 +264,43 @@ impl Deref for FetchClient {
 
     fn deref(&self) -> &Self::Target {
         &self.handle
+    }
+}
+
+fn schedule_http_cache_trim_once(config: &FetchConfig) {
+    let Some(cache_dir) = config.http_cache_dir() else {
+        return;
+    };
+    #[cfg(test)]
+    {
+        let _ = cache_dir;
+        if let Err(error) = crate::blocking::trim_http_cache(config) {
+            tracing::debug!("failed to trim HTTP cache during fetch client startup: {error}");
+        }
+    }
+    #[cfg(not(test))]
+    {
+        use std::{collections::HashSet, path::PathBuf, sync::OnceLock};
+        static TRIMMED_DIRS: OnceLock<parking_lot::Mutex<HashSet<(PathBuf, Option<u64>)>>> =
+            OnceLock::new();
+        let key = (PathBuf::from(cache_dir), config.http_cache_max_bytes());
+        let first_for_dir = TRIMMED_DIRS
+            .get_or_init(|| parking_lot::Mutex::new(HashSet::new()))
+            .lock()
+            .insert(key);
+        if !first_for_dir {
+            return;
+        }
+        let trim_config = config.clone();
+        let _ = std::thread::Builder::new()
+            .name("moli-http-cache-trim".to_owned())
+            .spawn(move || {
+                if let Err(error) = crate::blocking::trim_http_cache(&trim_config) {
+                    tracing::debug!(
+                        "failed to trim HTTP cache during fetch client startup: {error}"
+                    );
+                }
+            });
     }
 }
 

@@ -1,5 +1,5 @@
 use std::{
-    cell::{Cell, RefCell},
+    cell::{Cell, Ref, RefCell, RefMut},
     collections::{HashMap, HashSet},
 };
 
@@ -199,6 +199,16 @@ impl LazyStyleInvalidationRoots {
         *entry = (*entry).max(generation);
     }
 
+    pub(super) fn begin_batch_validation(&self) -> LazyStyleBatchValidator<'_> {
+        LazyStyleBatchValidator {
+            registry_generation: self.generation.get(),
+            floor_generation: self.document_floor_generation.get(),
+            roots: self.roots.borrow(),
+            path_stamps: self.path_stamps.borrow_mut(),
+            validated_elements: self.validated_elements.borrow_mut(),
+        }
+    }
+
     pub(super) fn clear(&self) {
         self.generation.set(0);
         self.document_floor_generation.set(0);
@@ -246,4 +256,72 @@ impl LazyStyleInvalidationRoots {
 
     #[cfg(not(test))]
     fn note_path_node_visit(&self) {}
+}
+
+/// Long-lived borrow of `LazyStyleInvalidationRoots` for top-down tree style
+/// pre-resolution in a single layout pass.
+pub(super) struct LazyStyleBatchValidator<'a> {
+    registry_generation: u64,
+    floor_generation: u64,
+    roots: Ref<'a, HashMap<DomHandle, u64>>,
+    path_stamps: RefMut<'a, HashMap<DomHandle, StylePathStamp>>,
+    validated_elements: RefMut<'a, HashMap<DomHandle, u64>>,
+}
+
+impl LazyStyleBatchValidator<'_> {
+    /// Computes the inherited required generation from all ancestors strictly
+    /// above `target` (such as the owning `Document` handle when `target` is
+    /// `documentElement`).
+    pub(super) fn required_generation_above(&self, host: &DomHost, target: DomHandle) -> u64 {
+        let mut required_generation = self.floor_generation;
+        if self.roots.is_empty() {
+            return required_generation;
+        }
+        let mut seen = HashSet::new();
+        let mut current = host
+            .parent_node(target)
+            .or_else(|| host.shadow_root_host(target));
+        while let Some(handle) = current.filter(|handle| seen.insert(*handle)) {
+            if let Some(&root_generation) = self.roots.get(&handle) {
+                required_generation = required_generation.max(root_generation);
+            }
+            current = host
+                .parent_node(handle)
+                .or_else(|| host.shadow_root_host(handle));
+        }
+        required_generation
+    }
+
+    pub(super) fn stamp_node(&mut self, handle: DomHandle, parent_required_generation: u64) -> u64 {
+        let mut required_generation = parent_required_generation;
+        if let Some(&root_generation) = self.roots.get(&handle) {
+            required_generation = required_generation.max(root_generation);
+        }
+        self.path_stamps.insert(
+            handle,
+            StylePathStamp {
+                registry_generation: self.registry_generation,
+                required_generation,
+            },
+        );
+        required_generation
+    }
+
+    pub(super) fn element_is_current(&self, element: DomHandle, required_generation: u64) -> bool {
+        required_generation == 0
+            || self
+                .validated_elements
+                .get(&element)
+                .copied()
+                .unwrap_or_default()
+                >= required_generation
+    }
+
+    pub(super) fn mark_element_current(&mut self, element: DomHandle, generation: u64) {
+        if generation == 0 {
+            return;
+        }
+        let entry = self.validated_elements.entry(element).or_default();
+        *entry = (*entry).max(generation);
+    }
 }

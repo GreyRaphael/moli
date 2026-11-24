@@ -1106,6 +1106,37 @@ impl MoliStyleEngine {
             read_document,
         )
     }
+
+    pub(crate) fn pre_resolve_layout_tree_styles(
+        &self,
+        host: &DomHost,
+        document_url: &url::Url,
+        document: DomHandle,
+        root: DomHandle,
+        scripting_enabled: bool,
+    ) -> std::collections::HashSet<DomHandle> {
+        computed::pre_resolve_layout_tree_styles(
+            self,
+            host,
+            document_url,
+            document,
+            root,
+            scripting_enabled,
+        )
+    }
+
+    pub(crate) fn cached_element_computed_values(
+        &self,
+        host: &DomHost,
+        document: DomHandle,
+        handle: DomHandle,
+    ) -> Option<(
+        style::servo_arc::Arc<style::properties::ComputedValues>,
+        Option<style::servo_arc::Arc<style::properties::ComputedValues>>,
+        Option<style::servo_arc::Arc<style::properties::ComputedValues>>,
+    )> {
+        computed::cached_element_computed_values(self, host, document, handle)
+    }
 }
 
 pub(crate) fn ensure_stylo_browser_compat_prefs() {

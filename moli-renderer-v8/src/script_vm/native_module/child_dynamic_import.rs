@@ -1046,9 +1046,9 @@ impl ScriptVm {
         let module_cache_candidates: Vec<_> = document_modulator
             .compiled_records()
             .filter_map(|record| {
-                record
-                    .code_cache_path()
-                    .map(|path| (record.compiled_module().clone(), path.to_path_buf()))
+                record.pending_code_cache_target().map(|(path, saved)| {
+                    (record.compiled_module().clone(), path.to_path_buf(), saved)
+                })
             })
             .collect();
         let promise = self
@@ -1082,12 +1082,16 @@ impl ScriptVm {
                     return Ok(Err(error));
                 };
                 let save_evaluated_cache = |scope: &mut v8::PinScope<'_, '_>| {
-                    for (global_mod, path) in &module_cache_candidates {
+                    for (global_mod, path, saved) in &module_cache_candidates {
+                        if saved.get() {
+                            continue;
+                        }
                         let local_mod = v8::Local::new(scope, global_mod);
                         if local_mod.get_status() == v8::ModuleStatus::Evaluated {
                             crate::script_vm::v8_code_cache::save_module_code_cache(
                                 scope, local_mod, path,
                             );
+                            saved.set(true);
                         }
                     }
                 };

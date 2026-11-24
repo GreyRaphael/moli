@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use dom::ElementState as StyloElementState;
 use style::{
@@ -8,7 +8,7 @@ use style::{
         QuirksMode, RegisteredSpeculativePainter, RegisteredSpeculativePainters,
         SharedStyleContext, StyleContext, StyleSystemOptions, ThreadLocalStyleContext,
     },
-    data::ElementStyles,
+    data::{ElementDataFlags, ElementStyles},
     dom::{TElement, TNode},
     properties::{
         ComputedValues, PropertyId,
@@ -22,6 +22,8 @@ use style::{
     selector_parser::{PseudoElement, SnapshotMap},
     servo_arc::Arc as ServoArc,
     shared_lock::StylesheetGuards,
+    sharing::StyleSharingTarget,
+    style_resolver::{PseudoElementResolution, StyleResolverForElement},
     stylesheets::{CssRuleType, UrlExtraData},
     stylist::RuleInclusion,
     thread_state::{self, ThreadState},
@@ -806,13 +808,6 @@ fn with_resolved_style_in_current_world<R>(
         }
 
         let canonical_styles = if path_needs_resolution {
-            populate_inline_style_attributes_for_resolution(
-                engine,
-                host,
-                document_url,
-                handle,
-                quirks_mode,
-            );
             install_shadow_cascade_data_for_resolution(world, dom_adapter);
             if validation_path.is_none() {
                 // Initial resolution already walks the ancestor chain. Build
@@ -824,6 +819,10 @@ fn with_resolved_style_in_current_world<R>(
                     .validation_path(host, world.document, handle);
             }
             resolve_element_styles(
+                engine,
+                host,
+                document_url,
+                quirks_mode,
                 world,
                 dom_adapter,
                 element,
@@ -846,6 +845,10 @@ fn with_resolved_style_in_current_world<R>(
                 .or_else(|| {
                     install_shadow_cascade_data_for_resolution(world, dom_adapter);
                     resolve_element_styles(
+                        engine,
+                        host,
+                        document_url,
+                        quirks_mode,
                         world,
                         dom_adapter,
                         element,
@@ -893,7 +896,299 @@ fn install_shadow_cascade_data_for_resolution(
         });
 }
 
+pub(super) fn pre_resolve_layout_tree_styles(
+    engine: &MoliStyleEngine,
+    host: &DomHost,
+    document_url: &url::Url,
+    document: DomHandle,
+    root: DomHandle,
+    scripting_enabled: bool,
+) -> HashSet<DomHandle> {
+    if host.owner_document_handle(root) != Some(document) {
+        return HashSet::new();
+    }
+    let world = engine.world_for_document(document);
+    if world
+        .document_state
+        .try_with_retained_style_system(|_| ())
+        .is_none()
+    {
+        return HashSet::new();
+    }
+    let quirks_mode = host
+        .node(document)
+        .and_then(Node::as_document)
+        .map(|document| document.quirks_mode())
+        .unwrap_or(QuirksMode::NoQuirks);
+    let profile_enabled = moli_trace::cpu_profile_enabled();
+    let started = profile_enabled.then(std::time::Instant::now);
+
+    let (pre_resolved, resolved_count, shared_hits, skipped_count) =
+        engine.dom_adapter.with_bound_host(host, |dom_adapter| {
+            let Some(root_element) = dom_adapter.element(host, root) else {
+                return (HashSet::new(), 0_u64, 0_u64, 0_u64);
+            };
+            let mut root_depth = 0usize;
+            let mut ancestor = root_element.traversal_parent();
+            let root_expected_parent =
+                ancestor.map(|parent| DomHandle::new(parent.as_node().debug_id()));
+            while let Some(current) = ancestor {
+                root_depth += 1;
+                ancestor = current.traversal_parent();
+            }
+
+            install_shadow_cascade_data_for_resolution(&world, dom_adapter);
+            let shared_lock = dom_adapter.shared_lock().clone();
+            let guard = shared_lock.read();
+            let guards = StylesheetGuards::same(&guard);
+            let snapshot_map = SnapshotMap::new();
+            let empty_painters = EmptyRegisteredSpeculativePainters;
+            let mut retained_selector_caches = world.document_state.take_selector_caches();
+
+            let (pre_resolved, resolved_count, shared_hits, skipped_count) =
+                world.document_state.with_retained_style_system(|retained| {
+                    let shared = SharedStyleContext {
+                        stylist: &retained.stylist,
+                        visited_styles_enabled: false,
+                        options: StyleSystemOptions::default(),
+                        guards,
+                        current_time_for_animations: 0.0,
+                        traversal_flags: TraversalFlags::empty(),
+                        snapshot_map: &snapshot_map,
+                        animations: DocumentAnimationSet::default(),
+                        registered_speculative_painters: &empty_painters,
+                    };
+                    let _layout_thread_state = StyloLayoutThreadStateGuard::enter();
+                    let mut thread_local = ThreadLocalStyleContext::new();
+                    std::mem::swap(
+                        &mut thread_local.selector_caches,
+                        &mut retained_selector_caches,
+                    );
+                    let mut context = StyleContext {
+                        shared: &shared,
+                        thread_local: &mut thread_local,
+                    };
+
+                    let mut validator = world
+                        .document_state
+                        .lazy_invalidation_roots
+                        .begin_batch_validation();
+                    let root_parent_required_gen = validator.required_generation_above(host, root);
+
+                    let mut pre_resolved = HashSet::new();
+                    let mut queue = VecDeque::new();
+                    queue.push_back((
+                        root,
+                        root_expected_parent,
+                        root_depth,
+                        root_parent_required_gen,
+                        false,
+                    ));
+
+                    let mut resolved_count = 0_u64;
+                    let mut shared_hits = 0_u64;
+                    let mut skipped_count = 0_u64;
+
+                    while let Some((
+                        handle,
+                        expected_parent,
+                        dom_depth,
+                        parent_required_gen,
+                        parent_restyled,
+                    )) = queue.pop_front()
+                    {
+                        if host.owner_document_handle(handle) != Some(document) {
+                            continue;
+                        }
+                        let Some(element) = dom_adapter.element(host, handle) else {
+                            continue;
+                        };
+                        let actual_parent = element
+                            .traversal_parent()
+                            .map(|parent| DomHandle::new(parent.as_node().debug_id()));
+                        if actual_parent != expected_parent {
+                            continue;
+                        }
+                        if host.assigned_slot_for_node(handle).is_some()
+                            || host.is_html_element_named(handle, "slot")
+                        {
+                            continue;
+                        }
+
+                        let required_gen = validator.stamp_node(handle, parent_required_gen);
+                        let existing_display = element
+                            .borrow_data()
+                            .filter(|data| data.has_styles() && data.hint.is_empty())
+                            .map(|data| data.styles.primary().clone_display());
+                        let is_current = !parent_restyled
+                            && existing_display.is_some()
+                            && validator.element_is_current(handle, required_gen);
+
+                        let (display_none, child_parent_restyled) = if is_current {
+                            unsafe {
+                                element.ensure_data().set_traversed_without_styling();
+                            }
+                            skipped_count = skipped_count.saturating_add(1);
+                            (
+                                existing_display.is_some_and(|display| display.is_none()),
+                                false,
+                            )
+                        } else {
+                            populate_inline_style_attribute_for_node(
+                                engine,
+                                host,
+                                document_url,
+                                &world,
+                                handle,
+                                quirks_mode,
+                            );
+                            world.pseudo_style_cache.invalidate_handles([handle]);
+                            unsafe {
+                                element.ensure_data().styles = ElementStyles::default();
+                            }
+                            context
+                                .thread_local
+                                .bloom_filter
+                                .insert_parents_recovering(element, dom_depth);
+                            let mut target = StyleSharingTarget::new(element);
+                            let resolved_styles = if let Some(shared_styles) =
+                                target.share_style_if_possible(&mut context)
+                            {
+                                shared_hits = shared_hits.saturating_add(1);
+                                shared_styles
+                            } else {
+                                let resolved = StyleResolverForElement::new(
+                                    element,
+                                    &mut context,
+                                    RuleInclusion::All,
+                                    PseudoElementResolution::IfApplicable,
+                                )
+                                .resolve_style_with_default_parents();
+                                context.thread_local.sharing_cache.insert_if_possible(
+                                    &element,
+                                    &resolved.primary,
+                                    Some(&mut target),
+                                    dom_depth,
+                                    context.shared,
+                                );
+                                resolved
+                            };
+                            let is_display_none =
+                                resolved_styles.primary.style().clone_display().is_none();
+                            unsafe {
+                                let mut data = element.ensure_data();
+                                data.set_styles(resolved_styles);
+                                data.set_restyled();
+                                data.clear_restyle_state();
+                            }
+                            validator.mark_element_current(handle, required_gen);
+                            resolved_count = resolved_count.saturating_add(1);
+                            (is_display_none, true)
+                        };
+
+                        pre_resolved.insert(handle);
+
+                        if !display_none
+                            && host.shadow_root_handle(handle).is_none()
+                            && host.get_attribute(handle, "hidden").is_none()
+                            && !(scripting_enabled
+                                && host.is_html_element_named(handle, "noscript"))
+                        {
+                            let mut child = host.first_child(handle);
+                            while let Some(current) = child {
+                                if host.node(current).is_some_and(Node::is_element) {
+                                    queue.push_back((
+                                        current,
+                                        Some(handle),
+                                        dom_depth + 1,
+                                        required_gen,
+                                        child_parent_restyled,
+                                    ));
+                                }
+                                child = host.next_sibling(current);
+                            }
+                        }
+                    }
+
+                    std::mem::swap(
+                        &mut context.thread_local.selector_caches,
+                        &mut retained_selector_caches,
+                    );
+                    (pre_resolved, resolved_count, shared_hits, skipped_count)
+                });
+
+            world
+                .document_state
+                .replace_selector_caches(retained_selector_caches);
+            if resolved_count > 0 {
+                world
+                    .document_state
+                    .note_element_style_resolutions(resolved_count);
+            }
+            (pre_resolved, resolved_count, shared_hits, skipped_count)
+        });
+
+    if let Some(started) = started {
+        let total_us = started.elapsed().as_micros();
+        if total_us >= 500 || resolved_count > 0 {
+            tracing::info!(
+                target: "moli_cpu_profile",
+                stage = "layout_pre_resolve_styles",
+                document = document.index_u32(),
+                visited = pre_resolved.len(),
+                resolved_count,
+                shared_hits,
+                skipped_count,
+                total_us,
+            );
+        }
+    }
+
+    pre_resolved
+}
+
+pub(super) fn cached_element_computed_values(
+    engine: &MoliStyleEngine,
+    host: &DomHost,
+    document: DomHandle,
+    handle: DomHandle,
+) -> Option<(
+    ServoArc<ComputedValues>,
+    Option<ServoArc<ComputedValues>>,
+    Option<ServoArc<ComputedValues>>,
+)> {
+    #[cfg(test)]
+    {
+        let world = engine.world_for_document(document);
+        let computed_cache_generation = world.document_state.computed_cache_generation();
+        world
+            .pseudo_style_cache
+            .record_primary(ComputedElementStyleCacheKey {
+                computed_cache_generation,
+                handle,
+                pseudo_element: None,
+            });
+    }
+    let _ = document;
+    engine.dom_adapter.with_bound_host(host, |dom_adapter| {
+        let element = dom_adapter.element(host, handle)?;
+        let data = element.borrow_data()?;
+        if !data.has_styles() || !data.hint.is_empty() {
+            return None;
+        }
+        Some((
+            data.styles.primary().clone(),
+            data.styles.pseudos.get(&PseudoElement::Before).cloned(),
+            data.styles.pseudos.get(&PseudoElement::After).cloned(),
+        ))
+    })
+}
+
 fn resolve_element_styles(
+    engine: &MoliStyleEngine,
+    host: &DomHost,
+    document_url: &url::Url,
+    quirks_mode: QuirksMode,
     world: &DocumentStyleWorld,
     dom_adapter: &moli_selector::StyloDomHostBinding<'_>,
     element: StyloElement<'_>,
@@ -929,12 +1224,24 @@ fn resolve_element_styles(
             thread_local: &mut thread_local,
         };
         let ancestor_resolution_count = materialize_ancestor_styles_for_resolution(
+            engine,
+            host,
+            document_url,
+            quirks_mode,
             &mut context,
             element,
             world,
             validation_path,
         );
         let target = DomHandle::new(element.as_node().debug_id());
+        populate_inline_style_attribute_for_node(
+            engine,
+            host,
+            document_url,
+            world,
+            target,
+            quirks_mode,
+        );
         world.pseudo_style_cache.invalidate_handles([target]);
         // `resolve_style` is the single-node initial-style API. Keep dirty
         // values published until this observation begins, then replace only
@@ -952,6 +1259,9 @@ fn resolve_element_styles(
         unsafe {
             let mut data = element.ensure_data();
             data.styles = styles.clone();
+            data.flags
+                .remove(ElementDataFlags::PRIMARY_STYLE_REUSED_VIA_RULE_NODE);
+            data.set_restyled();
             data.clear_restyle_state();
         }
         let required_generation = world
@@ -979,6 +1289,10 @@ fn resolve_element_styles(
 }
 
 fn materialize_ancestor_styles_for_resolution<E>(
+    engine: &MoliStyleEngine,
+    host: &DomHost,
+    document_url: &url::Url,
+    quirks_mode: QuirksMode,
     context: &mut StyleContext<E>,
     element: E,
     world: &DocumentStyleWorld,
@@ -1023,6 +1337,14 @@ where
         if canonical_is_current && !force_descendants {
             continue;
         }
+        populate_inline_style_attribute_for_node(
+            engine,
+            host,
+            document_url,
+            world,
+            handle,
+            quirks_mode,
+        );
         world.pseudo_style_cache.invalidate_handles([handle]);
         unsafe {
             ancestor.ensure_data().styles = ElementStyles::default();
@@ -1032,6 +1354,9 @@ where
         unsafe {
             let mut data = ancestor.ensure_data();
             data.styles = styles;
+            data.flags
+                .remove(ElementDataFlags::PRIMARY_STYLE_REUSED_VIA_RULE_NODE);
+            data.set_restyled();
             data.clear_restyle_state();
         }
         world
@@ -1338,51 +1663,41 @@ pub(super) fn ensure_retained_style_system_for_document_for_test(
     );
 }
 
-fn populate_inline_style_attributes_for_resolution(
+fn populate_inline_style_attribute_for_node(
     engine: &MoliStyleEngine,
     host: &DomHost,
     document_url: &url::Url,
-    handle: DomHandle,
+    world: &DocumentStyleWorld,
+    node: DomHandle,
     quirks_mode: QuirksMode,
 ) {
-    let shared_lock = engine.dom_adapter.shared_lock();
-    let mut current = Some(handle);
-    while let Some(node) = current {
-        let world = engine.owner_document_world(host, node);
-        let Some(world) = world else {
-            current = inherited_style_parent(host, node);
-            continue;
-        };
-        if world.inline_style_metadata.csp_state(node)
-            == super::InlineStyleCspState::BlockedAttribute
-        {
-            engine.dom_adapter.clear_inline_style_attribute(node);
-            current = inherited_style_parent(host, node);
-            continue;
-        }
-        if let Some(style_attribute) = world
-            .inline_style_metadata
-            .resolution_text(node)
-            .or_else(|| host.get_attribute(node, "style"))
-        {
-            let base_url = world
-                .inline_style_metadata
-                .base_url(node)
-                .unwrap_or_else(|| style_resolution_base_url(host, document_url, node));
-            let url_data = UrlExtraData::from(base_url);
-            let declarations = parse_style_attribute(
-                &style_attribute,
-                &url_data,
-                None,
-                quirks_mode,
-                CssRuleType::Style,
-            );
-            engine
-                .dom_adapter
-                .set_inline_style_attribute(node, ServoArc::new(shared_lock.wrap(declarations)));
-        }
-        current = inherited_style_parent(host, node);
+    if world.inline_style_metadata.csp_state(node) == super::InlineStyleCspState::BlockedAttribute {
+        engine.dom_adapter.clear_inline_style_attribute(node);
+        return;
     }
+    let Some(style_attribute) = world
+        .inline_style_metadata
+        .resolution_text(node)
+        .or_else(|| host.get_attribute(node, "style"))
+    else {
+        return;
+    };
+    let base_url = world
+        .inline_style_metadata
+        .base_url(node)
+        .unwrap_or_else(|| style_resolution_base_url(host, document_url, node));
+    let url_data = UrlExtraData::from(base_url);
+    let declarations = parse_style_attribute(
+        &style_attribute,
+        &url_data,
+        None,
+        quirks_mode,
+        CssRuleType::Style,
+    );
+    let shared_lock = engine.dom_adapter.shared_lock();
+    engine
+        .dom_adapter
+        .set_inline_style_attribute(node, ServoArc::new(shared_lock.wrap(declarations)));
 }
 
 fn style_resolution_base_url(
@@ -1510,19 +1825,6 @@ fn serialize_computed_custom_property(style: &ComputedValues, property: &str) ->
         return Some(" ".to_owned());
     }
     Some(serialized)
-}
-
-fn inherited_style_parent(host: &DomHost, handle: DomHandle) -> Option<DomHandle> {
-    if host.is_shadow_root(handle) {
-        return host.shadow_root_host(handle);
-    }
-    let parent = host
-        .node(handle)
-        .and_then(crate::dom::native::Node::parent_node)?;
-    if host.is_shadow_root(parent) {
-        return host.shadow_root_host(parent);
-    }
-    Some(parent)
 }
 
 struct EmptyRegisteredSpeculativePainters;

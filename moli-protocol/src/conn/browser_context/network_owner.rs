@@ -777,20 +777,33 @@ impl CdpConnection {
                 Some(CdpSessionRoute::Browser)
             )
         {
+            let previous_effective = self
+                .browser_context
+                .as_ref()
+                .and_then(|browser_context| browser_context.default_tls_verify_host_override)
+                .unwrap_or(self.base_tls_verify_host);
             if let Some(browser_context) = self.browser_context.as_mut() {
                 browser_context.default_tls_verify_host_override = Some(enabled);
             } else {
                 self.base_tls_verify_host = enabled;
             }
+            if previous_effective == enabled {
+                return Ok(None);
+            }
             self.apply_active_engine_fetch_overrides();
             return self.start_rebuild_resource_runtime_for_session_owner(session_id);
         }
 
+        let base_tls_verify_host = self.base_tls_verify_host;
         let Some(owner) = self.target_session_owner_mut(session_id) else {
             return Err("BrowserContextNotLoaded".to_owned());
         };
+        let previous_effective = owner.effective_tls_verify_host(base_tls_verify_host);
         if !owner.set_tls_verify_host_override(enabled) {
             return Err("BrowserContextNotLoaded".to_owned());
+        }
+        if previous_effective == enabled {
+            return Ok(None);
         }
         self.start_rebuild_resource_runtime_for_session_owner(session_id)
     }

@@ -3392,7 +3392,7 @@ impl ScriptVm {
                 } else {
                     let mut compiler_source =
                         v8::script_compiler::Source::new(source_string, Some(&origin));
-                    let module = v8::script_compiler::compile_module(&scope, &mut compiler_source)
+                    v8::script_compiler::compile_module(&scope, &mut compiler_source)
                         .ok_or_else(|| {
                             let exception = scope
                                 .exception()
@@ -3415,21 +3415,18 @@ impl ScriptVm {
                                 "v8 failed to compile native module `{source_url}`: {}",
                                 exception
                             )
-                        })?;
-                    if !used_cache && let Some(ref path) = code_cache_path {
-                        super::v8_code_cache::save_module_code_cache(&scope, module, path);
-                    }
-                    module
+                        })?
                 };
                 let requests = collect_module_requests(&mut scope, module)?;
                 let identity = module_identity_hash_from_v8_module(module);
                 let compiled_module = v8::Global::new(scope.as_ref(), module);
+                let pending_code_cache_path = if used_cache { None } else { code_cache_path };
                 Ok((
                     ModuleRecordEntry::new_with_code_cache_path(
                         key,
                         compiled_module,
                         requests,
-                        code_cache_path,
+                        pending_code_cache_path,
                     ),
                     identity,
                 ))
@@ -3774,9 +3771,9 @@ impl ScriptVm {
             .document_runtime
             .compiled_records()
             .filter_map(|record| {
-                record
-                    .code_cache_path()
-                    .map(|path| (record.compiled_module().clone(), path.to_path_buf()))
+                record.pending_code_cache_target().map(|(path, saved)| {
+                    (record.compiled_module().clone(), path.to_path_buf(), saved)
+                })
             })
             .collect();
         let promise = self
@@ -3840,10 +3837,14 @@ impl ScriptVm {
                     )));
                 }
                 let save_evaluated_cache = |scope: &mut v8::PinScope<'_, '_>| {
-                    for (global_mod, path) in &module_cache_candidates {
+                    for (global_mod, path, saved) in &module_cache_candidates {
+                        if saved.get() {
+                            continue;
+                        }
                         let local_mod = v8::Local::new(scope, global_mod);
                         if local_mod.get_status() == v8::ModuleStatus::Evaluated {
                             super::v8_code_cache::save_module_code_cache(scope, local_mod, path);
+                            saved.set(true);
                         }
                     }
                 };

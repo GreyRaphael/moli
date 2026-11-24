@@ -1800,6 +1800,34 @@ impl JsContextHost {
             )
     }
 
+    pub(crate) fn pre_resolve_layout_tree_styles(
+        &self,
+        document: DomHandle,
+        root: DomHandle,
+        scripting_enabled: bool,
+    ) -> HashSet<DomHandle> {
+        self.style_engine.pre_resolve_layout_tree_styles(
+            self.dom_host(),
+            self.document_url(),
+            document,
+            root,
+            scripting_enabled,
+        )
+    }
+
+    pub(crate) fn cached_element_computed_values(
+        &self,
+        document: DomHandle,
+        handle: DomHandle,
+    ) -> Option<(
+        style::servo_arc::Arc<style::properties::ComputedValues>,
+        Option<style::servo_arc::Arc<style::properties::ComputedValues>>,
+        Option<style::servo_arc::Arc<style::properties::ComputedValues>>,
+    )> {
+        self.style_engine
+            .cached_element_computed_values(self.dom_host(), document, handle)
+    }
+
     #[cfg(test)]
     pub(crate) fn stylo_computed_style_property_reads_for_test(&self) -> u64 {
         self.stylo_computed_style_property_reads.get()

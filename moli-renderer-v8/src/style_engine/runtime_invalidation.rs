@@ -27,6 +27,7 @@ use super::{
 };
 
 const IMMEDIATE_STRUCTURAL_MUTATION_EFFECT_LIMIT: usize = 256;
+const IMMEDIATE_STRUCTURAL_MUTATION_INSERTED_ELEMENT_LIMIT: usize = 256;
 
 impl MoliStyleEngine {
     #[cfg(test)]
@@ -149,6 +150,21 @@ impl MoliStyleEngine {
         emulated_media: &EmulatedMediaOverrides,
         viewport: StyleViewport,
     ) {
+        if structural_mutations_exceed_inserted_element_limit(
+            host,
+            effects,
+            IMMEDIATE_STRUCTURAL_MUTATION_INSERTED_ELEMENT_LIMIT,
+        ) {
+            self.queue_structural_mutation_source_scope_fallback(
+                document,
+                world,
+                host,
+                effects,
+                emulated_media,
+                viewport,
+            );
+            return;
+        }
         let profile_enabled = moli_trace::cpu_profile_enabled();
         let total_started = profile_enabled.then(std::time::Instant::now);
         let source_scope_started = profile_enabled.then(std::time::Instant::now);
@@ -222,6 +238,11 @@ impl MoliStyleEngine {
     ) {
         self.invalidate_detached_style_subtrees_for_mutations(host, effects);
         if effects.len() <= IMMEDIATE_STRUCTURAL_MUTATION_EFFECT_LIMIT
+            && !structural_mutations_exceed_inserted_element_limit(
+                host,
+                effects,
+                IMMEDIATE_STRUCTURAL_MUTATION_INSERTED_ELEMENT_LIMIT,
+            )
             && child_list_effects_have_current_topology(host, effects)
         {
             self.queue_style_invalidation_for_mutations(
@@ -605,6 +626,48 @@ fn world_has_style_state(engine: &MoliStyleEngine, world: &DocumentStyleWorld) -
 
 fn should_defer_structural_mutations(effects: &[StyleMutationEffect]) -> bool {
     super::mutation_effect::style_mutation_effects_are_child_list_structural(effects)
+}
+
+fn structural_mutations_exceed_inserted_element_limit(
+    host: &DomHost,
+    effects: &[StyleMutationEffect],
+    limit: usize,
+) -> bool {
+    let mut seen_roots = std::collections::HashSet::<DomHandle>::new();
+    let mut stack = Vec::<DomHandle>::new();
+    for effect in effects {
+        let candidates: &[DomHandle] = match effect {
+            StyleMutationEffect::ChildList { added_nodes, .. } => added_nodes,
+            StyleMutationEffect::ConnectedSubtrees { roots } => roots,
+            StyleMutationEffect::Attribute { .. }
+            | StyleMutationEffect::DisconnectedSubtrees { .. }
+            | StyleMutationEffect::SlotAssignment { .. }
+            | StyleMutationEffect::CharacterData { .. } => continue,
+        };
+        for &root in candidates {
+            if seen_roots.insert(root) {
+                stack.push(root);
+            }
+        }
+    }
+    let mut count = 0usize;
+    while let Some(handle) = stack.pop() {
+        let Some(node) = host.node(handle) else {
+            continue;
+        };
+        if node.as_element().is_some() {
+            count += 1;
+            if count > limit {
+                return true;
+            }
+        }
+        let mut child = node.first_child();
+        while let Some(current) = child {
+            stack.push(current);
+            child = host.next_sibling(current);
+        }
+    }
+    false
 }
 
 fn style_mutation_effects_by_owner_document(

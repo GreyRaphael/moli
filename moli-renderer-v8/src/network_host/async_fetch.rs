@@ -424,20 +424,23 @@ async fn run_cors_preflight_if_needed(
             return Ok(());
         }
 
-        while let crate::network_host::cors_cache::InFlightAction::Wait(mut rx) =
-            cors_cache.register_or_wait(&origin_str, &request.url, request.credentials_mode)
-        {
-            let _ = rx.wait_for(|&done| done).await;
-            if cors_cache.check(
-                &origin_str,
-                &request.url,
-                request.credentials_mode,
-                &request.method,
-                preflight_request_headers,
-            ) {
-                return Ok(());
+        let in_flight_guard = loop {
+            match cors_cache.register_or_wait(&origin_str, &request.url, request.credentials_mode) {
+                crate::network_host::cors_cache::InFlightAction::Execute(guard) => break guard,
+                crate::network_host::cors_cache::InFlightAction::Wait(mut rx) => {
+                    let _ = rx.wait_for(|&done| done).await;
+                    if cors_cache.check(
+                        &origin_str,
+                        &request.url,
+                        request.credentials_mode,
+                        &request.method,
+                        preflight_request_headers,
+                    ) {
+                        return Ok(());
+                    }
+                }
             }
-        }
+        };
 
         let observable_preflight_headers = preflight_headers.clone();
         let mut preflight_request = match Request::new_browser_bytes(
@@ -449,7 +452,7 @@ async fn run_cors_preflight_if_needed(
         ) {
             Ok(req) => req,
             Err(error) => {
-                cors_cache.finish_in_flight(&origin_str, &request.url, request.credentials_mode);
+                in_flight_guard.finish();
                 return Err(format!("cors preflight: failed to build request: {error}"));
             }
         }
@@ -478,7 +481,7 @@ async fn run_cors_preflight_if_needed(
         {
             Ok(response) => response,
             Err(error) => {
-                cors_cache.finish_in_flight(&origin_str, &request.url, request.credentials_mode);
+                in_flight_guard.finish();
                 if let Some(observer) = preflight_observer {
                     observer.send_preflight_failure(
                         request.url.clone(),
@@ -514,7 +517,7 @@ async fn run_cors_preflight_if_needed(
             );
         }
 
-        cors_cache.finish_in_flight(&origin_str, &request.url, request.credentials_mode);
+        in_flight_guard.finish();
         validation_res?;
     }
     Ok(())

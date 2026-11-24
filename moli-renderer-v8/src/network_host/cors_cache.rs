@@ -59,14 +59,37 @@ impl CorsPreflightEntry {
     }
 }
 
+const MAX_CORS_PREFLIGHT_ENTRIES: usize = 1024;
+
 #[derive(Default)]
 pub(crate) struct CorsPreflightCache {
     entries: Mutex<HashMap<PreflightCacheKey, CorsPreflightEntry>>,
     in_flight: Mutex<HashMap<PreflightCacheKey, (Arc<watch::Sender<bool>>, watch::Receiver<bool>)>>,
 }
 
+pub(crate) struct InFlightPreflightGuard {
+    cache: Arc<CorsPreflightCache>,
+    key: Option<PreflightCacheKey>,
+}
+
+impl InFlightPreflightGuard {
+    pub fn finish(mut self) {
+        if let Some(key) = self.key.take() {
+            self.cache.finish_in_flight_key(&key);
+        }
+    }
+}
+
+impl Drop for InFlightPreflightGuard {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            self.cache.finish_in_flight_key(&key);
+        }
+    }
+}
+
 pub(crate) enum InFlightAction {
-    Execute,
+    Execute(InFlightPreflightGuard),
     Wait(watch::Receiver<bool>),
 }
 
@@ -96,7 +119,7 @@ impl CorsPreflightCache {
     }
 
     pub fn register_or_wait(
-        &self,
+        self: &Arc<Self>,
         origin: &str,
         url: &Url,
         credentials_mode: RequestCredentialsMode,
@@ -107,11 +130,21 @@ impl CorsPreflightCache {
             InFlightAction::Wait(rx.clone())
         } else {
             let (tx, rx) = watch::channel(false);
-            in_flight.insert(key, (Arc::new(tx), rx));
-            InFlightAction::Execute
+            in_flight.insert(key.clone(), (Arc::new(tx), rx));
+            InFlightAction::Execute(InFlightPreflightGuard {
+                cache: Arc::clone(self),
+                key: Some(key),
+            })
         }
     }
 
+    fn finish_in_flight_key(&self, key: &PreflightCacheKey) {
+        if let Some((tx, _)) = self.in_flight.lock().remove(key) {
+            let _ = tx.send(true);
+        }
+    }
+
+    #[cfg(test)]
     pub fn finish_in_flight(
         &self,
         origin: &str,
@@ -119,9 +152,7 @@ impl CorsPreflightCache {
         credentials_mode: RequestCredentialsMode,
     ) {
         let key = PreflightCacheKey::new(origin, url, credentials_mode);
-        if let Some((tx, _)) = self.in_flight.lock().remove(&key) {
-            let _ = tx.send(true);
-        }
+        self.finish_in_flight_key(&key);
     }
 
     pub fn record(
@@ -164,15 +195,28 @@ impl CorsPreflightCache {
             .filter(|s| !s.is_empty())
             .collect();
 
+        let now = Instant::now();
         let entry = CorsPreflightEntry {
-            expires_at: Instant::now() + Duration::from_secs(max_age),
+            expires_at: now + Duration::from_secs(max_age),
             allow_methods,
             allow_all_methods,
             allow_headers,
             allow_all_headers,
         };
 
-        self.entries.lock().insert(key, entry);
+        let mut entries = self.entries.lock();
+        if entries.len() >= MAX_CORS_PREFLIGHT_ENTRIES && !entries.contains_key(&key) {
+            entries.retain(|_, existing| now < existing.expires_at);
+            if entries.len() >= MAX_CORS_PREFLIGHT_ENTRIES
+                && let Some(oldest_key) = entries
+                    .iter()
+                    .min_by_key(|(_, existing)| existing.expires_at)
+                    .map(|(k, _)| k.clone())
+            {
+                entries.remove(&oldest_key);
+            }
+        }
+        entries.insert(key, entry);
     }
 
     #[allow(dead_code)]
@@ -242,14 +286,14 @@ mod tests {
         let credentials = RequestCredentialsMode::SameOrigin;
 
         // First caller registers and executes
-        match cache.register_or_wait(origin, &url, credentials) {
-            InFlightAction::Execute => {}
+        let guard = match cache.register_or_wait(origin, &url, credentials) {
+            InFlightAction::Execute(guard) => guard,
             InFlightAction::Wait(_) => panic!("Expected Execute"),
-        }
+        };
 
         // Second caller registers while first is still in flight -> must get Wait!
         let mut rx = match cache.register_or_wait(origin, &url, credentials) {
-            InFlightAction::Execute => panic!("Expected Wait"),
+            InFlightAction::Execute(_) => panic!("Expected Wait"),
             InFlightAction::Wait(rx) => rx,
         };
 
@@ -259,7 +303,7 @@ mod tests {
             ("access-control-max-age".to_owned(), "60".to_owned()),
         ];
         cache.record(origin, &url, credentials, &response_headers);
-        cache.finish_in_flight(origin, &url, credentials);
+        guard.finish();
 
         // Second caller waits and sees completion
         let _ = rx.wait_for(|&done| done).await;

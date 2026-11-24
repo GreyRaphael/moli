@@ -1,4 +1,4 @@
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -22,6 +22,7 @@ pub(crate) struct ModuleRecordEntry {
     wasm_module: Option<WasmModuleRecord>,
     state: ModuleRecordState,
     code_cache_path: Option<PathBuf>,
+    code_cache_saved: Rc<Cell<bool>>,
 }
 
 impl ModuleRecordEntry {
@@ -37,6 +38,7 @@ impl ModuleRecordEntry {
             wasm_module: None,
             state: ModuleRecordState::Compiled,
             code_cache_path: None,
+            code_cache_saved: Rc::new(Cell::new(true)),
         }
     }
 
@@ -46,6 +48,7 @@ impl ModuleRecordEntry {
         requests: Vec<ModuleRequestRecord>,
         code_cache_path: Option<PathBuf>,
     ) -> Self {
+        let already_saved = code_cache_path.is_none();
         Self {
             key,
             compiled_module,
@@ -53,6 +56,7 @@ impl ModuleRecordEntry {
             wasm_module: None,
             state: ModuleRecordState::Compiled,
             code_cache_path,
+            code_cache_saved: Rc::new(Cell::new(already_saved)),
         }
     }
 
@@ -69,6 +73,7 @@ impl ModuleRecordEntry {
             wasm_module: Some(wasm_module),
             state: ModuleRecordState::Compiled,
             code_cache_path: None,
+            code_cache_saved: Rc::new(Cell::new(true)),
         }
     }
 
@@ -92,8 +97,13 @@ impl ModuleRecordEntry {
         self.state = state;
     }
 
-    pub(crate) fn code_cache_path(&self) -> Option<&Path> {
-        self.code_cache_path.as_deref()
+    pub(crate) fn pending_code_cache_target(&self) -> Option<(&Path, Rc<Cell<bool>>)> {
+        if self.code_cache_saved.get() {
+            return None;
+        }
+        self.code_cache_path
+            .as_deref()
+            .map(|path| (path, Rc::clone(&self.code_cache_saved)))
     }
 }
 
